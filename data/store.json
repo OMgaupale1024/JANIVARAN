@@ -1,0 +1,360 @@
+{
+  "grievances": [
+    {
+      "id": "G-1000",
+      "title": "Water Supply Issue reported",
+      "category": "Water Supply",
+      "location": "Ward 12, Indiranagar",
+      "status": "RESOLVED",
+      "priority": "CRITICAL",
+      "submittedAt": "2026-01-31T00:17:52.721Z",
+      "slaDeadline": "2026-01-29T16:18:03.198Z",
+      "escalationLevel": "L1_DEPT_HEAD",
+      "assignedTo": "Field Officer Sharma",
+      "history": [
+        {
+          "timestamp": "2026-01-31T00:17:52.721Z",
+          "action": "SUBMITTED",
+          "details": "Grievance received via Portal",
+          "by": "Citizen"
+        },
+        {
+          "timestamp": "2026-01-31T16:18:03.199Z",
+          "action": "AUTO_ESCALATION",
+          "details": "Auto-escalated to Level 1 (Dept Head) due to SLA Breach",
+          "by": "System Engine"
+        }
+      ]
+    },
+    {
+      "id": "G-1001",
+      "title": "Roads Issue reported",
+      "category": "Roads",
+      "location": "Zone 4, MG Road",
+      "status": "RESOLVED",
+      "priority": "CRITICAL",
+      "submittedAt": "2026-01-30T00:17:52.721Z",
+      "slaDeadline": "2026-01-29T16:18:03.797Z",
+      "escalationLevel": "L1_DEPT_HEAD",
+      "assignedTo": "Field Officer Sharma",
+      "history": [
+        {
+          "timestamp": "2026-01-30T00:17:52.721Z",
+          "action": "SUBMITTED",
+          "details": "Grievance received via Portal",
+          "by": "Citizen"
+        },
+        {
+          "timestamp": "2026-01-31T16:18:03.798Z",
+          "action": "AUTO_ESCALATION",
+          "details": "Auto-escalated to Level 1 (Dept Head) due to SLA Breach",
+          "by": "System Engine"
+        }
+      ]
+    },
+    {
+      "id": "G-1002",
+      "title": "Electricity Issue reported",
+      "category": "Electricity",
+      "location": "Sector 2, HSR Layout",
+      "status": "RESOLVED",
+      "priority": "MEDIUM",
+      "submittedAt": "2026-01-30T11:17:52.721Z",
+      "slaDeadline": "2026-01-29T16:18:04.463Z",
+      "escalationLevel": "L1_DEPT_HEAD",
+      "assignedTo": "Field Officer Sharma",
+      "history": [
+        {
+          "timestamp": "2026-01-30T11:17:52.721Z",
+          "action": "SUBMITTED",
+          "details": "Grievance received via Portal",
+          "by": "Citizen"
+        },
+        {
+          "timestamp": "2026-01-31T16:18:04.464Z",
+          "action": "AUTO_ESCALATION",
+          "details": "Auto-escalated to Level 1 (Dept Head) due to SLA Breach",
+          "by": "System Engine"
+        }
+      ]
+    },
+    {
+      "id": "G-1003",
+      "title": "Sanitation Issue reported",
+      "category": "Sanitation",
+      "location": "Ward 5, Koramangala",
+      "status": "RESOLVED",
+      "priority": "CRITICAL",
+      "submittedAt": "2026-01-31T14:17:52.721Z",
+      "slaDeadline": "2026-01-29T16:18:05.134Z",
+      "escalationLevel": "L1_DEPT_HEAD",
+      "assignedTo": "Field Officer Sharma",
+      "history": [
+        {
+          "timestamp": "2026-01-31T14:17:52.721Z",
+          "action": "SUBMITTED",
+          "details": "Grievance received via Portal",
+          "by": "Citizen"
+        },
+        {
+          "timestamp": "2026-01-31T16:18:05.135Z",
+          "action": "AUTO_ESCALATION",
+          "details": "Auto-escalated to Level 1 (Dept Head) due to SLA Breach",
+          "by": "System Engine"
+        }
+      ]
+    },
+    {
+      "id": "G-1004",
+      "title": "Public Transport Issue reported",
+      "category": "Public Transport",
+      "location": "Ward 12, Indiranagar",
+      "status": "RESOLVED",
+      "priority": "CRITICAL",
+      "submittedAt": "2026-01-30T05:17:52.721Z",
+      "slaDeadline": "2026-01-29T16:18:05.802Z",
+      "escalationLevel": "L1_DEPT_HEAD",
+      "assignedTo": "Field Officer Sharma",
+      "history": [
+        {
+          "timestamp": "2026-01-30T05:17:52.721Z",
+          "action": "SUBMITTED",
+          "details": "Grievance received via Portal",
+          "by": "Citizen"
+        },
+        {
+          "timestamp": "2026-01-31T16:18:05.803Z",
+          "action": "AUTO_ESCALATION",
+          "details": "Auto-escalated to Level 1 (Dept Head) due to SLA Breach",
+          "by": "System Engine"
+        }
+      ]
+    },
+    {
+      "id": "G-1005",
+      "title": "Water Supply Issue reported",
+      "category": "Water Supply",
+      "location": "Zone 4, MG Road",
+      "status": "RESOLVED",
+      "priority": "HIGH",
+      "submittedAt": "2026-01-31T11:17:52.721Z",
+      "slaDeadline": "2026-01-29T16:18:06.781Z",
+      "escalationLevel": "L1_DEPT_HEAD",
+      "assignedTo": "Field Officer Sharma",
+      "history": [
+        {
+          "timestamp": "2026-01-31T11:17:52.721Z",
+          "action": "SUBMITTED",
+          "details": "Grievance received via Portal",
+          "by": "Citizen"
+        },
+        {
+          "timestamp": "2026-01-31T16:18:06.781Z",
+          "action": "AUTO_ESCALATION",
+          "details": "Auto-escalated to Level 1 (Dept Head) due to SLA Breach",
+          "by": "System Engine"
+        }
+      ]
+    },
+    {
+      "id": "G-1006",
+      "title": "Roads Issue reported",
+      "category": "Roads",
+      "location": "Sector 2, HSR Layout",
+      "status": "RESOLVED",
+      "priority": "HIGH",
+      "submittedAt": "2026-01-31T10:17:52.721Z",
+      "slaDeadline": "2026-01-30T06:17:52.721Z",
+      "escalationLevel": "L1_DEPT_HEAD",
+      "assignedTo": "Field Officer Sharma",
+      "history": [
+        {
+          "timestamp": "2026-01-31T10:17:52.721Z",
+          "action": "SUBMITTED",
+          "details": "Grievance received via Portal",
+          "by": "Citizen"
+        }
+      ]
+    },
+    {
+      "id": "G-1007",
+      "title": "Electricity Issue reported",
+      "category": "Electricity",
+      "location": "Ward 5, Koramangala",
+      "status": "RESOLVED",
+      "priority": "HIGH",
+      "submittedAt": "2026-01-30T04:17:52.721Z",
+      "slaDeadline": "2026-01-29T16:18:07.395Z",
+      "escalationLevel": "L1_DEPT_HEAD",
+      "assignedTo": "Field Officer Sharma",
+      "history": [
+        {
+          "timestamp": "2026-01-30T04:17:52.721Z",
+          "action": "SUBMITTED",
+          "details": "Grievance received via Portal",
+          "by": "Citizen"
+        },
+        {
+          "timestamp": "2026-01-31T16:18:07.396Z",
+          "action": "AUTO_ESCALATION",
+          "details": "Auto-escalated to Level 1 (Dept Head) due to SLA Breach",
+          "by": "System Engine"
+        }
+      ]
+    },
+    {
+      "id": "G-1008",
+      "title": "Sanitation Issue reported",
+      "category": "Sanitation",
+      "location": "Ward 12, Indiranagar",
+      "status": "RESOLVED",
+      "priority": "HIGH",
+      "submittedAt": "2026-01-30T22:17:52.721Z",
+      "slaDeadline": "2026-01-29T16:18:07.972Z",
+      "escalationLevel": "L1_DEPT_HEAD",
+      "assignedTo": "Field Officer Sharma",
+      "history": [
+        {
+          "timestamp": "2026-01-30T22:17:52.721Z",
+          "action": "SUBMITTED",
+          "details": "Grievance received via Portal",
+          "by": "Citizen"
+        },
+        {
+          "timestamp": "2026-01-31T16:18:07.973Z",
+          "action": "AUTO_ESCALATION",
+          "details": "Auto-escalated to Level 1 (Dept Head) due to SLA Breach",
+          "by": "System Engine"
+        }
+      ]
+    },
+    {
+      "id": "G-1009",
+      "title": "Public Transport Issue reported",
+      "category": "Public Transport",
+      "location": "Zone 4, MG Road",
+      "status": "RESOLVED",
+      "priority": "HIGH",
+      "submittedAt": "2026-01-30T17:17:52.721Z",
+      "slaDeadline": "2026-01-29T16:18:17.289Z",
+      "escalationLevel": "L1_DEPT_HEAD",
+      "assignedTo": "Field Officer Sharma",
+      "history": [
+        {
+          "timestamp": "2026-01-30T17:17:52.721Z",
+          "action": "SUBMITTED",
+          "details": "Grievance received via Portal",
+          "by": "Citizen"
+        },
+        {
+          "timestamp": "2026-01-31T16:18:17.290Z",
+          "action": "AUTO_ESCALATION",
+          "details": "Auto-escalated to Level 1 (Dept Head) due to SLA Breach",
+          "by": "System Engine"
+        }
+      ]
+    },
+    {
+      "id": "G-1010",
+      "title": "Water Supply Issue reported",
+      "category": "Water Supply",
+      "location": "Sector 2, HSR Layout",
+      "status": "RESOLVED",
+      "priority": "CRITICAL",
+      "submittedAt": "2026-01-30T07:17:52.721Z",
+      "slaDeadline": "2026-02-02T07:17:52.721Z",
+      "escalationLevel": "NONE",
+      "assignedTo": "Field Officer Sharma",
+      "history": [
+        {
+          "timestamp": "2026-01-30T07:17:52.721Z",
+          "action": "SUBMITTED",
+          "details": "Grievance received via Portal",
+          "by": "Citizen"
+        }
+      ]
+    },
+    {
+      "id": "G-1011",
+      "title": "Roads Issue reported",
+      "category": "Roads",
+      "location": "Ward 5, Koramangala",
+      "status": "RESOLVED",
+      "priority": "HIGH",
+      "submittedAt": "2026-01-30T14:17:52.721Z",
+      "slaDeadline": "2026-01-29T10:17:52.721Z",
+      "escalationLevel": "L1_DEPT_HEAD",
+      "assignedTo": "Field Officer Sharma",
+      "history": [
+        {
+          "timestamp": "2026-01-30T14:17:52.721Z",
+          "action": "SUBMITTED",
+          "details": "Grievance received via Portal",
+          "by": "Citizen"
+        }
+      ]
+    },
+    {
+      "id": "G-1012",
+      "title": "Electricity Issue reported",
+      "category": "Electricity",
+      "location": "Ward 12, Indiranagar",
+      "status": "IN_PROGRESS",
+      "priority": "HIGH",
+      "submittedAt": "2026-01-30T10:17:52.721Z",
+      "slaDeadline": "2026-02-02T10:17:52.721Z",
+      "escalationLevel": "NONE",
+      "assignedTo": "Field Officer Sharma",
+      "history": [
+        {
+          "timestamp": "2026-01-30T10:17:52.721Z",
+          "action": "SUBMITTED",
+          "details": "Grievance received via Portal",
+          "by": "Citizen"
+        }
+      ]
+    },
+    {
+      "id": "G-1013",
+      "title": "Sanitation Issue reported",
+      "category": "Sanitation",
+      "location": "Zone 4, MG Road",
+      "status": "IN_PROGRESS",
+      "priority": "MEDIUM",
+      "submittedAt": "2026-01-31T15:17:52.721Z",
+      "slaDeadline": "2026-02-03T15:17:52.721Z",
+      "escalationLevel": "NONE",
+      "assignedTo": "Field Officer Sharma",
+      "history": [
+        {
+          "timestamp": "2026-01-31T15:17:52.721Z",
+          "action": "SUBMITTED",
+          "details": "Grievance received via Portal",
+          "by": "Citizen"
+        }
+      ]
+    },
+    {
+      "id": "G-1014",
+      "title": "Public Transport Issue reported",
+      "category": "Public Transport",
+      "location": "Sector 2, HSR Layout",
+      "status": "RESOLVED",
+      "priority": "MEDIUM",
+      "submittedAt": "2026-01-30T21:17:52.721Z",
+      "slaDeadline": "2026-01-29T17:17:52.721Z",
+      "escalationLevel": "L1_DEPT_HEAD",
+      "assignedTo": "Field Officer Sharma",
+      "history": [
+        {
+          "timestamp": "2026-01-30T21:17:52.721Z",
+          "action": "SUBMITTED",
+          "details": "Grievance received via Portal",
+          "by": "Citizen"
+        }
+      ]
+    }
+  ],
+  "currentId": 1015,
+  "virtualTimeOffset": 64800000
+}

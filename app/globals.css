@@ -1,0 +1,294 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: #9cf0b3; /* Fresh Pale Green from reference */
+  --foreground: #1c3d25; /* Deep Forest Green for text */
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    /* Forcing the brand look even in dark mode for this specific landing page request, 
+       or we can keep dark mode. The reference is very specific about the green. 
+       Let's keep the green as the brand identity. */
+    --background: #9cf0b3; 
+    --foreground: #1c3d25;
+  }
+}
+
+body {
+  color: var(--foreground);
+  background: var(--background);
+  font-family: var(--font-inter), Arial, Helvetica, sans-serif;
+  overflow-x: hidden;
+}
+
+/* User Provided "Uiverse" Styles */
+.modal {
+  width: 100%;
+  max-width: 500px;
+  /* Adapted for responsiveness */
+  background: linear-gradient(180deg, #DCF9E0 0%, #FFFFFF 30.21%);
+  box-shadow: 0px 187px 75px rgba(0, 0, 0, 0.01), 0px 105px 63px rgba(0, 0, 0, 0.05), 0px 47px 47px rgba(0, 0, 0, 0.09), 0px 12px 26px rgba(0, 0, 0, 0.1), 0px 0px 0px rgba(0, 0, 0, 0.1);
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.5);
+}
+
+.title {
+  font-weight: 700;
+  font-size: 17px;
+  line-height: 21px;
+  text-align: center;
+  color: #2B2B2F;
+  margin-bottom: 5px;
+}
+
+.description {
+  max-width: 80%;
+  margin: auto;
+  font-weight: 600;
+  font-size: 11px;
+  line-height: 16px;
+  text-align: center;
+  color: #5F5D6B;
+  margin-bottom: 20px;
+}
+
+.tab-container {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  position: relative;
+  padding: 2px;
+  background-color: #ebebec;
+  border-radius: 9px;
+  margin: 10px 20px 20px 20px;
+}
+
+.indicator {
+  content: "";
+  width: 50%;
+  height: 28px;
+  background: #FFFFFF;
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  z-index: 9;
+  border: 0.5px solid rgba(0, 0, 0, 0.04);
+  box-shadow: 0px 3px 8px rgba(0, 0, 0, 0.12), 0px 3px 1px rgba(0, 0, 0, 0.04);
+  border-radius: 7px;
+  transition: all 0.2s ease-out;
+}
+
+.tab {
+  width: 50%;
+  height: 28px;
+  position: relative;
+  z-index: 99;
+  background-color: transparent;
+  border: 0;
+  outline: none;
+  flex: none;
+  align-self: stretch;
+  flex-grow: 1;
+  cursor: pointer;
+  font-weight: 500;
+  font-size: 12px;
+  color: #5F5D6B;
+  transition: color 0.2s ease;
+}
+
+.tab.active {
+  color: #2B2B2F;
+  font-weight: 700;
+}
+
+/* Dynamic Indicator Positioning */
+.tab-container[data-active="0"] .indicator {
+  left: 2px;
+}
+
+.tab-container[data-active="1"] .indicator {
+  left: calc(50% - 2px);
+}
+
+.upgrade-btn {
+  display: flex;
+  flex-direction: row;
+  justify-content: center;
+  align-items: center;
+  width: 100%;
+  height: 44px;
+  background: #0bdd12;
+  box-shadow: 0px 0.5px 0.5px #EFEFEF, 0px 1px 0.5px rgba(239, 239, 239, 0.5);
+  border-radius: 7px;
+  border: 0;
+  outline: none;
+  color: #ffffff;
+  font-size: 14px;
+  font-weight: 600;
+  transition: all 0.3s cubic-bezier(0.15, 0.83, 0.66, 1);
+  cursor: pointer;
+}
+
+.upgrade-btn:hover {
+  background-color: #07b90d;
+}
+
+.upgrade-btn:disabled {
+  background-color: #9ca3af;
+  cursor: not-allowed;
+}
+
+.input-group {
+  margin-bottom: 12px;
+}
+
+.input-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #2B2B2F;
+  margin-bottom: 4px;
+  display: block;
+}
+
+.custom-input {
+  width: 100%;
+  background: #F8F9FA;
+  border: 1px solid #E9E9E9;
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 13px;
+  outline: none;
+  transition: all 0.2s;
+}
+
+.custom-input:focus {
+  border-color: #0bdd12;
+  background: white;
+  box-shadow: 0 0 0 3px rgba(11, 221, 18, 0.1);
+}
+
+[data-theme='dark'] {
+  --glass-bg: rgba(15, 23, 42, 0.6);
+  --glass-border: rgba(255, 255, 255, 0.1);
+  --glass-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+  --text-primary: #f8fafc;
+  --text-secondary: #94a3b8;
+  --background-gradient: linear-gradient(to bottom right, #0f172a, #1e293b);
+}
+
+* {
+  box-sizing: border-box;
+  padding: 0;
+  margin: 0;
+}
+
+html,
+body {
+  max-width: 100vw;
+  overflow-x: hidden;
+  font-family: var(--font-sans);
+  background: var(--background-gradient);
+  color: var(--text-primary);
+  min-height: 100vh;
+  scroll-behavior: smooth;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+/* Glassmorphism Utilities */
+.glass-panel {
+  background: var(--glass-bg);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-shadow);
+  border-radius: 16px;
+}
+
+.glass-button {
+  background: rgba(255, 255, 255, 0.2);
+  backdrop-filter: blur(4px);
+  border: 1px solid var(--glass-border);
+  padding: 0.5rem 1rem;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.glass-button:hover {
+  background: rgba(255, 255, 255, 0.4);
+  transform: translateY(-1px);
+}
+
+.glass-input {
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid var(--glass-border);
+  padding: 0.75rem;
+  border-radius: 8px;
+  width: 100%;
+  color: var(--text-primary);
+  outline: none;
+}
+
+.glass-input:focus {
+  border-color: var(--accent-color);
+  background: rgba(255, 255, 255, 0.2);
+}
+
+/* Utilities */
+.container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 0 1rem;
+}
+
+.flex-center {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.text-gradient {
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-image: linear-gradient(45deg, var(--accent-color), #8b5cf6);
+}
+
+/* Animations */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.5s ease-out forwards;
+}
+
+/* SLA Colors */
+.sla-safe {
+  color: var(--success-color);
+}
+
+.sla-risk {
+  color: var(--warning-color);
+}
+
+.sla-breach {
+  color: var(--danger-color);
+}
