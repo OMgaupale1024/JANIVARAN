@@ -96,7 +96,3 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ---
 
-### 📞 Support
-For urgent issues or feature requests:
-*   **Phone**: 9322088956
-*   **Email**: ogaupale@gmail.com
