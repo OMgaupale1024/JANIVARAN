@@ -1,109 +1,70 @@
 import { Complaint, ComplaintStatus, ComplaintPriority } from '@/types/backend';
-import { Grievance } from '@/lib/types';
-import { Timestamp } from 'firebase/firestore';
+import { Grievance, GrievanceHistory, GrievanceStatus, Priority } from '@/lib/types';
+import { getSLADeadline, toMillis } from '@/lib/services/sla-service';
+
+const STATUS_MAP: Record<ComplaintStatus, GrievanceStatus> = {
+    'pending': 'PENDING',
+    'under-review': 'UNDER_REVIEW',
+    'in-progress': 'IN_PROGRESS',
+    'resolved': 'RESOLVED',
+    'escalated': 'ESCALATED',
+    'closed': 'RESOLVED',
+};
+
+const PRIORITY_MAP: Record<ComplaintPriority, Priority> = {
+    'low': 'LOW',
+    'medium': 'MEDIUM',
+    'high': 'HIGH',
+    'critical': 'CRITICAL',
+};
+
+// Status-change timestamps that make up the admin timeline
+const HISTORY_FIELDS: Array<[keyof Complaint, string]> = [
+    ['underReviewAt', 'UNDER_REVIEW'],
+    ['assignedAt', 'ASSIGNED'],
+    ['inProgressAt', 'IN_PROGRESS'],
+    ['escalatedAt', 'ESCALATED'],
+    ['resolvedAt', 'RESOLVED'],
+    ['closedAt', 'CLOSED'],
+];
+
+const iso = (value: unknown): string | undefined => {
+    const ms = toMillis(value);
+    return ms === null ? undefined : new Date(ms).toISOString();
+};
 
 /**
  * Convert Complaint (Firestore) to Grievance (Admin UI)
  */
 export function complaintToGrievance(complaint: Complaint): Grievance {
-    const createdAt = complaint.createdAt instanceof Timestamp
-        ? complaint.createdAt.toDate()
-        : new Date(complaint.createdAt);
+    const submittedAt = iso(complaint.createdAt) ?? new Date().toISOString();
 
-    // Calculate SLA deadline
-    const slaHours = getSLAHoursForPriority(complaint.priority);
-    const deadline = new Date(createdAt.getTime() + slaHours * 60 * 60 * 1000);
+    const history: GrievanceHistory[] = [
+        { timestamp: submittedAt, action: 'SUBMITTED', details: 'Complaint submitted via portal', by: complaint.citizenName || 'Citizen' },
+    ];
+    for (const [field, action] of HISTORY_FIELDS) {
+        const timestamp = iso(complaint[field]);
+        if (timestamp) history.push({ timestamp, action, by: 'Official' });
+    }
+    history.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
 
     return {
-        id: complaint.id, // Use Firestore document ID for API calls
-        trackingId: complaint.trackingId, // Keep tracking ID for display
+        id: complaint.id, // Firestore document ID for API calls
+        trackingId: complaint.trackingId, // Tracking ID for display
         title: complaint.title,
+        description: complaint.description,
         category: complaint.category,
         location: complaint.location,
-        status: mapComplaintStatusToGrievanceStatus(complaint.status),
-        priority: mapComplaintPriorityToGrievancePriority(complaint.priority),
-        submittedAt: createdAt.toISOString(),
-        slaDeadline: deadline.toISOString(),
+        status: STATUS_MAP[complaint.status] || 'PENDING',
+        priority: PRIORITY_MAP[complaint.priority] || 'MEDIUM',
+        submittedAt,
+        updatedAt: iso(complaint.updatedAt),
+        resolvedAt: iso(complaint.resolvedAt) ?? iso(complaint.closedAt),
+        slaHours: complaint.sla?.assignedHours,
+        slaDeadline: getSLADeadline(complaint).toISOString(),
         escalationLevel: complaint.status === 'escalated' ? 'L1_DEPT_HEAD' : 'NONE',
         assignedTo: complaint.assignedTo || 'Unassigned',
-        history: [
-            {
-                timestamp: createdAt.toISOString(),
-                action: 'SUBMITTED',
-                details: 'Complaint submitted via portal',
-                by: complaint.citizenName || 'Citizen'
-            }
-        ]
+        photoURLs: complaint.photoURLs ?? [],
+        history,
     };
-}
-
-/**
- * Map Complaint status to Grievance status
- */
-function mapComplaintStatusToGrievanceStatus(status: ComplaintStatus): 'PENDING' | 'IN_PROGRESS' | 'RESOLVED' | 'ESCALATED' {
-    const statusMap: Record<ComplaintStatus, 'PENDING' | 'IN_PROGRESS' | 'RESOLVED' | 'ESCALATED'> = {
-        'pending': 'PENDING',
-        'in-progress': 'IN_PROGRESS',
-        'resolved': 'RESOLVED',
-        'escalated': 'ESCALATED',
-        'closed': 'RESOLVED'
-    };
-
-    return statusMap[status] || 'PENDING';
-}
-
-/**
- * Map Complaint priority to Grievance priority
- */
-function mapComplaintPriorityToGrievancePriority(priority: ComplaintPriority): 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL' {
-    const priorityMap: Record<ComplaintPriority, 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'> = {
-        'low': 'LOW',
-        'medium': 'MEDIUM',
-        'high': 'HIGH',
-        'critical': 'CRITICAL'
-    };
-
-    return priorityMap[priority] || 'MEDIUM';
-}
-
-/**
- * Get SLA hours for a priority level
- */
-function getSLAHoursForPriority(priority: ComplaintPriority): number {
-    const slaHours: Record<ComplaintPriority, number> = {
-        'critical': 24,
-        'high': 72,
-        'medium': 168,
-        'low': 336
-    };
-
-    return slaHours[priority] || 168;
-}
-
-/**
- * Map Grievance status back to Complaint status
- */
-export function grievanceStatusToComplaintStatus(status: string): ComplaintStatus {
-    const statusMap: Record<string, ComplaintStatus> = {
-        'PENDING': 'pending',
-        'IN_PROGRESS': 'in-progress',
-        'RESOLVED': 'resolved',
-        'ESCALATED': 'escalated'
-    };
-
-    return statusMap[status] || 'pending';
-}
-
-/**
- * Map Grievance priority back to Complaint priority
- */
-export function grievancePriorityToComplaintPriority(priority: string): ComplaintPriority {
-    const priorityMap: Record<string, ComplaintPriority> = {
-        'LOW': 'low',
-        'MEDIUM': 'medium',
-        'HIGH': 'high',
-        'CRITICAL': 'critical'
-    };
-
-    return priorityMap[priority] || 'medium';
 }

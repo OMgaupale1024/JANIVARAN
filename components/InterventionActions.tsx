@@ -3,18 +3,15 @@
 import React, { useState } from 'react';
 import { Phone, AlertCircle, X } from 'lucide-react';
 import { AuthorityContact } from '@/lib/services/intervention-service';
+import { apiFetch } from '@/lib/api-client';
 
 interface InterventionActionsProps {
     complaintId: string;
-    userId: string;
-    userName: string;
     onActionComplete?: () => void;
 }
 
 export default function InterventionActions({
     complaintId,
-    userId,
-    userName,
     onActionComplete,
 }: InterventionActionsProps) {
     const [showCallModal, setShowCallModal] = useState(false);
@@ -28,25 +25,16 @@ export default function InterventionActions({
     const handleCallAuthority = async () => {
         setLoading(true);
         try {
-            const response = await fetch(`/api/complaints/${complaintId}/intervene`, {
+            const data = await apiFetch<{ contact: AuthorityContact }>(`/api/complaints/${complaintId}/intervene`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    action: 'call',
-                    userId,
-                    userName,
-                }),
+                body: JSON.stringify({ action: 'call' }),
             });
-
-            const data = await response.json();
-            if (data.success) {
-                setContact(data.contact);
-                setShowCallModal(true);
-                onActionComplete?.();
-            }
+            setContact(data.contact);
+            setShowCallModal(true);
+            onActionComplete?.();
         } catch (error) {
             console.error('Error initiating call:', error);
-            alert('Failed to retrieve contact information');
+            alert(error instanceof Error ? error.message : 'Failed to retrieve contact information');
         } finally {
             setLoading(false);
         }
@@ -61,29 +49,22 @@ export default function InterventionActions({
 
         setLoading(true);
         try {
-            const response = await fetch(`/api/complaints/${complaintId}/intervene`, {
+            const data = await apiFetch<{ ticketId: string }>(`/api/complaints/${complaintId}/intervene`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    action: 'escalation',
-                    userId,
-                    userName,
+                    action: 'raise-ticket',
                     reason: escalationReason,
-                    message: escalationMessage || undefined,
+                    message: escalationMessage,
                 }),
             });
-
-            const data = await response.json();
-            if (data.success) {
-                alert(`Escalation submitted successfully!\nEscalation ID: ${data.escalationId}`);
-                setShowEscalationModal(false);
-                setEscalationReason('');
-                setEscalationMessage('');
-                onActionComplete?.();
-            }
+            alert(`Escalation submitted successfully!\nTicket ID: ${data.ticketId}`);
+            setShowEscalationModal(false);
+            setEscalationReason('');
+            setEscalationMessage('');
+            onActionComplete?.();
         } catch (error) {
             console.error('Error raising escalation:', error);
-            alert('Failed to submit escalation request');
+            alert(error instanceof Error ? error.message : 'Failed to submit escalation request');
         } finally {
             setLoading(false);
         }
@@ -144,6 +125,7 @@ export default function InterventionActions({
                             </div>
                             <button
                                 onClick={() => setShowCallModal(false)}
+                                aria-label="Close"
                                 className="text-slate-400 hover:text-slate-600"
                             >
                                 <X className="w-5 h-5" />
@@ -208,6 +190,7 @@ export default function InterventionActions({
                             </div>
                             <button
                                 onClick={() => setShowEscalationModal(false)}
+                                aria-label="Close"
                                 className="text-slate-400 hover:text-slate-600"
                             >
                                 <X className="w-5 h-5" />
@@ -216,10 +199,11 @@ export default function InterventionActions({
 
                         <div className="space-y-4">
                             <div>
-                                <label className="block text-sm font-semibold text-slate-700 mb-2">
+                                <label htmlFor="escalation-reason" className="block text-sm font-semibold text-slate-700 mb-2">
                                     Reason for Escalation <span className="text-red-600">*</span>
                                 </label>
                                 <select
+                                    id="escalation-reason"
                                     value={escalationReason}
                                     onChange={(e) => setEscalationReason(e.target.value)}
                                     className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-forest-500 focus:border-forest-500"
@@ -234,10 +218,12 @@ export default function InterventionActions({
                             </div>
 
                             <div>
-                                <label className="block text-sm font-semibold text-slate-700 mb-2">
+                                <label htmlFor="escalation-message" className="block text-sm font-semibold text-slate-700 mb-2">
                                     Additional Message (Optional)
                                 </label>
                                 <textarea
+                                    id="escalation-message"
+                                    maxLength={1000}
                                     value={escalationMessage}
                                     onChange={(e) => setEscalationMessage(e.target.value)}
                                     placeholder="Provide any additional context or details..."

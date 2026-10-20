@@ -2,15 +2,22 @@
 
 import React, { useState } from 'react';
 import Link from 'next/link';
-import { Search, MapPin, Home, AlertTriangle } from 'lucide-react';
-import { getComplaintByTrackingId } from '@/lib/services/complaint-service';
-import { Complaint } from '@/types/backend';
-import ComplaintTimeline from '@/components/ComplaintTimeline';
+import { Search, MapPin, Home } from 'lucide-react';
+import ComplaintTimeline, { TimelineComplaint } from '@/components/ComplaintTimeline';
+
+// Public tracking view returned by /api/track (no personal details)
+type TrackedComplaint = TimelineComplaint & {
+    trackingId: string;
+    title: string;
+    location: string;
+    priority: string;
+    department?: string;
+};
 
 export default function TrackComplaint() {
     const [trackingId, setTrackingId] = useState('');
     const [status, setStatus] = useState<'idle' | 'searching' | 'found' | 'error'>('idle');
-    const [complaint, setComplaint] = useState<Complaint | null>(null);
+    const [complaint, setComplaint] = useState<TrackedComplaint | null>(null);
     const [errorMsg, setErrorMsg] = useState('');
 
     const handleSearch = async (e: React.FormEvent) => {
@@ -22,14 +29,17 @@ export default function TrackComplaint() {
         setErrorMsg('');
 
         try {
-            const result = await getComplaintByTrackingId(trackingId.trim());
+            const response = await fetch(`/api/track?trackingId=${encodeURIComponent(trackingId.trim())}`);
+            const body = await response.json().catch(() => ({}));
 
-            if (result) {
-                setComplaint(result);
+            if (response.ok && body.success) {
+                setComplaint(body.data);
                 setStatus('found');
             } else {
                 setStatus('error');
-                setErrorMsg('Complaint not found. Please check the ID and try again.');
+                setErrorMsg(response.status === 404
+                    ? 'Complaint not found. Please check the ID and try again.'
+                    : body.error || 'An error occurred while tracking. Please try again.');
             }
         } catch (error) {
             console.error('Search error:', error);
@@ -60,13 +70,15 @@ export default function TrackComplaint() {
                     <form onSubmit={handleSearch} className="max-w-md mx-auto relative">
                         <input
                             type="text"
+                            aria-label="Tracking ID"
                             className="w-full border-2 border-gray-200 rounded-full py-4 pl-6 pr-14 text-lg focus:border-noble-dark focus:ring-0 outline-none transition-colors"
-                            placeholder="e.g. JAN-82910"
+                            placeholder="e.g. JAN-829104"
                             value={trackingId}
                             onChange={(e) => setTrackingId(e.target.value)}
                         />
                         <button
                             type="submit"
+                            aria-label="Track complaint"
                             className="absolute right-2 top-2 bottom-2 bg-noble-dark text-white w-12 rounded-full flex items-center justify-center hover:bg-opacity-90 transition-all"
                             disabled={status === 'searching'}
                         >
@@ -78,7 +90,7 @@ export default function TrackComplaint() {
                         </button>
                     </form>
                     {status === 'error' && (
-                        <div className="mt-4 text-red-500 bg-red-50 inline-block px-4 py-2 rounded-lg text-sm font-medium animate-shake">
+                        <div role="alert" className="mt-4 text-red-500 bg-red-50 inline-block px-4 py-2 rounded-lg text-sm font-medium animate-shake">
                             {errorMsg}
                         </div>
                     )}
@@ -96,7 +108,7 @@ export default function TrackComplaint() {
                                 complaint.status === 'resolved' ? 'bg-green-500' :
                                     'bg-white/20'
                                 }`}>
-                                {complaint.status}
+                                {complaint.status.replace('-', ' ')}
                             </div>
                         </div>
 
@@ -104,7 +116,7 @@ export default function TrackComplaint() {
                             <div className="flex flex-col md:flex-row gap-6 md:gap-12 mb-8 border-b border-gray-100 pb-8">
                                 <div>
                                     <h2 className="text-xl font-bold text-gray-800 mb-2">{complaint.title}</h2>
-                                    <p className="text-gray-600">{complaint.description}</p>
+                                    <p className="text-gray-600">{complaint.category}{complaint.department ? ` • ${complaint.department}` : ''}</p>
                                 </div>
                                 <div className="shrink-0 space-y-2 text-sm text-gray-500">
                                     <div className="flex items-center gap-2">

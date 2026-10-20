@@ -52,7 +52,7 @@ export default function TestimonialTicker() {
                 <div className="bg-noble-light/10 p-8 rounded-2xl border-l-4 border-noble-light backdrop-blur-sm relative">
                     <Quote className="absolute top-4 left-4 text-noble-light/20 w-12 h-12 -z-10" />
                     <p className="text-xl md:text-2xl font-serif leading-relaxed italic">
-                        "{activeTestimonial.quote}"
+                        &ldquo;{activeTestimonial.quote}&rdquo;
                     </p>
                 </div>
                 <div className="flex items-center gap-4 animate-fade-in">

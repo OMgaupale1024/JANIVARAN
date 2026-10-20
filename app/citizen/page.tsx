@@ -32,8 +32,8 @@ export default function CitizenLogin() {
             await signIn(email, password);
             // Use window.location for more reliable redirect
             window.location.href = '/citizen/dashboard';
-        } catch (err: any) {
-            setError(err.message || 'Failed to sign in. Please check your credentials.');
+        } catch (err) {
+            setError(err instanceof Error && err.message ? err.message : 'Failed to sign in. Please check your credentials.');
             setLoading(false);
         }
     };
@@ -46,8 +46,8 @@ export default function CitizenLogin() {
             await signInWithGoogle();
             // Use window.location for more reliable redirect
             window.location.href = '/citizen/dashboard';
-        } catch (err: any) {
-            setError(err.message || 'Failed to sign in with Google.');
+        } catch (err) {
+            setError(err instanceof Error && err.message ? err.message : 'Failed to sign in with Google.');
             setLoading(false);
         }
     };
@@ -154,7 +154,7 @@ export default function CitizenLogin() {
 
                 {/* Sign Up Link */}
                 <p className="text-center text-sm text-gray-600 mt-6">
-                    Don't have an account?{' '}
+                    Don&apos;t have an account?{' '}
                     <Link href="/citizen/signup" className="text-blue-600 hover:text-blue-700 font-semibold">
                         Sign Up
                     </Link>

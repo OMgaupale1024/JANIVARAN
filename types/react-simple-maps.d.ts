@@ -11,7 +11,7 @@ declare module 'react-simple-maps' {
     export interface ComposableMapProps {
         width?: number;
         height?: number;
-        projection?: string | ((width: number, height: number, config: any) => any);
+        projection?: string | ((width: number, height: number, config: ProjectionConfig) => unknown);
         projectionConfig?: ProjectionConfig;
         className?: string;
         style?: React.CSSProperties;
@@ -21,14 +21,16 @@ declare module 'react-simple-maps' {
     export class ComposableMap extends React.Component<ComposableMapProps> { }
 
     export interface GeographiesProps {
-        geography?: string | Record<string, any> | string[];
-        children?: (args: { geographies: any[]; projection: any; path: any }) => React.ReactNode;
+        geography?: string | Record<string, unknown> | string[];
+        children?: (args: { geographies: Geo[]; projection: unknown; path: unknown }) => React.ReactNode;
     }
+
+    export type Geo = Record<string, unknown> & { rsmKey: string };
 
     export class Geographies extends React.Component<GeographiesProps> { }
 
     export interface GeographyProps {
-        geography?: any;
+        geography?: Geo;
         key?: string | number;
         onMouseEnter?: (event: React.MouseEvent) => void;
         onMouseLeave?: (event: React.MouseEvent) => void;
@@ -40,7 +42,7 @@ declare module 'react-simple-maps' {
             hover?: React.CSSProperties;
             pressed?: React.CSSProperties;
         };
-        [key: string]: any;
+        [key: string]: unknown;
     }
 
     export class Geography extends React.Component<GeographyProps> { }

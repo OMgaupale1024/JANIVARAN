@@ -1,77 +1,64 @@
-import { NextResponse } from 'next/server';
-import { adminDb } from '@/lib/firebase-admin';
+import { NextRequest, NextResponse } from 'next/server';
 import { Timestamp } from 'firebase-admin/firestore';
+import { adminDb } from '@/lib/firebase-admin';
+import { errorResponse, HttpError, readJson, requireUser } from '@/lib/server/auth';
 
-export async function POST(request: Request) {
-    const { action, hours } = await request.json();
+const HOUR_MS = 60 * 60 * 1000;
+
+// Shift a timestamp field back in time (simulates the clock moving forward)
+const shifted = (value: unknown, ms: number) =>
+    value instanceof Timestamp ? Timestamp.fromMillis(value.toMillis() - ms) : value;
+
+/**
+ * POST /api/simulation  (development demo only)
+ * Disabled in production. In development it requires an authority account and
+ * only touches complaints explicitly marked `testData: true`.
+ */
+export async function POST(request: NextRequest) {
+    if (process.env.NODE_ENV === 'production') {
+        return NextResponse.json({ success: false, error: 'Not found' }, { status: 404 });
+    }
 
     try {
+        const user = await requireUser(request);
+        if (user.role !== 'admin') throw new HttpError(403, 'Authority access required');
+        const { action, hours } = await readJson(request);
+
+        const db = adminDb();
+        const active = await db.collection('complaints')
+            .where('testData', '==', true)
+            .where('status', 'in', ['pending', 'under-review', 'in-progress', 'escalated'])
+            .get();
+
         if (action === 'FORWARD_TIME') {
-            const shiftHours = hours || 1;
-            const shiftMillis = shiftHours * 60 * 60 * 1000;
-
-            console.log(`⏩ [SIMULATION] Forwarding time by ${shiftHours} hours`);
-
-            const snapshot = await adminDb.collection('complaints')
-                .where('status', 'not-in', ['resolved', 'closed'])
-                .get();
-
-            if (snapshot.empty) {
-                return NextResponse.json({ success: true, message: 'No active complaints to shift' });
-            }
-
-            const batch = adminDb.batch();
-
-            snapshot.docs.forEach(doc => {
+            const shiftHours = typeof hours === 'number' && hours > 0 && hours <= 72 ? hours : 1;
+            const batch = db.batch();
+            // createdAt and the stored deadline move together so the SLA window is preserved
+            active.docs.forEach(doc => {
                 const data = doc.data();
-                if (data.createdAt) {
-                    // Shift createdAt BACKWARDS to simulate time passing (making the complaint older)
-                    const oldTime = data.createdAt.toDate().getTime();
-                    const newTime = new Date(oldTime - shiftMillis);
-
-                    batch.update(doc.ref, {
-                        createdAt: Timestamp.fromDate(newTime),
-                        // Also shift updatedAt to keep it consistent usually, but not strictly required for SLA
-                    });
-                }
+                batch.update(doc.ref, {
+                    createdAt: shifted(data.createdAt, shiftHours * HOUR_MS),
+                    'sla.deadline': shifted(data.sla?.deadline, shiftHours * HOUR_MS),
+                });
             });
-
             await batch.commit();
-            return NextResponse.json({ success: true, message: `Simulated ${shiftHours} hours passing (Shifted creation times back)` });
+            return NextResponse.json({ success: true, message: `Simulated ${shiftHours}h on ${active.size} test complaint(s)` });
         }
 
         if (action === 'FORCE_BREACH') {
-            console.log(`⚠️ [SIMULATION] Forcing Breach`);
-
-            // Find a candidate: Active, not escalated, not critical (optional)
-            const snapshot = await adminDb.collection('complaints')
-                .where('status', 'in', ['pending', 'in-progress', 'under-review'])
-                .limit(1)
-                .get();
-
-            if (snapshot.empty) {
-                return NextResponse.json({ success: false, message: 'No active complaints found to breach' });
-            }
-
-            const doc = snapshot.docs[0];
-
-            // Force breach by setting createdAt to 3 days ago (72 hours) - assumes 48h SLA
-            const threeDaysAgo = new Date(Date.now() - (72 * 60 * 60 * 1000));
-
+            const doc = active.docs[0];
+            if (!doc) return NextResponse.json({ success: false, message: 'No active test complaints found to breach' });
+            const data = doc.data();
+            const overdueBy = (data.sla?.assignedHours ?? 48) * HOUR_MS + HOUR_MS;
             await doc.ref.update({
-                createdAt: Timestamp.fromDate(threeDaysAgo),
-                // We don't auto-escalate here, the frontend or a background job would pick it up. 
-                // But for visual breach, this is enough. 
-                // If we want to test auto-escalation trigger, we might need to call that service.
+                createdAt: shifted(data.createdAt, overdueBy),
+                'sla.deadline': shifted(data.sla?.deadline, overdueBy),
             });
-
-            return NextResponse.json({ success: true, message: `Forced breach on complaint ${doc.id}` });
+            return NextResponse.json({ success: true, message: `Forced breach on test complaint ${doc.id}` });
         }
 
-        return NextResponse.json({ error: 'Invalid action' }, { status: 400 });
-
-    } catch (error: any) {
-        console.error('Simulation Error:', error);
-        return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+        throw new HttpError(400, 'Invalid action');
+    } catch (error) {
+        return errorResponse(error, 'POST /api/simulation');
     }
 }

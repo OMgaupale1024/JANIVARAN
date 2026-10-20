@@ -13,6 +13,34 @@
                     "order": "DESCENDING"
                 }
             ]
+        },
+        {
+            "collectionGroup": "auditLogs",
+            "queryScope": "COLLECTION",
+            "fields": [
+                {
+                    "fieldPath": "complaintId",
+                    "order": "ASCENDING"
+                },
+                {
+                    "fieldPath": "timestamp",
+                    "order": "DESCENDING"
+                }
+            ]
+        },
+        {
+            "collectionGroup": "escalations",
+            "queryScope": "COLLECTION",
+            "fields": [
+                {
+                    "fieldPath": "complaintId",
+                    "order": "ASCENDING"
+                },
+                {
+                    "fieldPath": "escalatedAt",
+                    "order": "DESCENDING"
+                }
+            ]
         }
     ],
     "fieldOverrides": []

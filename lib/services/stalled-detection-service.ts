@@ -1,147 +1,53 @@
-import { Complaint, ComplaintStatus } from '@/types/backend';
-import { Timestamp } from 'firebase/firestore';
+import { calculateSLA, toMillis, SLAInput } from './sla-service';
 
-// Configuration for stalled detection
-const STALLED_THRESHOLD_PERCENTAGE = 0.7; // 70% of SLA duration
+// A complaint is stalled when its status has not changed for 70% of its SLA window
+const STALLED_THRESHOLD_PERCENTAGE = 0.7;
 
-// SLA durations in hours by priority
-const SLA_HOURS: Record<string, number> = {
-    CRITICAL: 24,
-    HIGH: 72,
-    MEDIUM: 168, // 7 days
-    LOW: 336, // 14 days
-};
+type StallInput = SLAInput & { lastStatusChange?: unknown };
 
 /**
  * Check if a complaint is stalled (not progressing)
  * A complaint is stalled if:
- * 1. Status unchanged for >70% of SLA duration, OR
- * 2. SLA has already been breached
+ * 1. SLA has already been breached, OR
+ * 2. Status unchanged for >70% of the SLA window
+ * Resolved/closed complaints are never stalled.
  */
-export function isComplaintStalled(complaint: Complaint): boolean {
-    // Resolved complaints are never stalled
-    if (complaint.status === 'RESOLVED') {
-        return false;
-    }
-
-    // Check if SLA is breached
-    if (isSLABreached(complaint)) {
-        return true;
-    }
-
-    // Check if status unchanged for significant portion of SLA
-    const progressPercentage = getProgressPercentage(complaint);
-    return progressPercentage >= STALLED_THRESHOLD_PERCENTAGE;
+export function isComplaintStalled(complaint: StallInput, now: number = Date.now()): boolean {
+    const sla = calculateSLA(complaint, now);
+    if (sla.closed) return false;
+    if (sla.status === 'breached') return true;
+    return getProgressPercentage(complaint, now) >= STALLED_THRESHOLD_PERCENTAGE;
 }
 
 /**
- * Check if SLA has been breached
+ * Check if SLA has been breached (open complaints only)
  */
-export function isSLABreached(complaint: Complaint): boolean {
-    const slaHours = SLA_HOURS[complaint.priority] || SLA_HOURS.MEDIUM;
-    const createdAt = complaint.createdAt instanceof Timestamp
-        ? complaint.createdAt.toDate()
-        : new Date(complaint.createdAt);
-
-    const slaDeadline = new Date(createdAt.getTime() + slaHours * 60 * 60 * 1000);
-    return new Date() > slaDeadline;
+export function isSLABreached(complaint: StallInput, now: number = Date.now()): boolean {
+    const sla = calculateSLA(complaint, now);
+    return !sla.closed && sla.status === 'breached';
 }
 
 /**
- * Get progress percentage (0-1) based on time elapsed since last status change
+ * Fraction (0-1) of the SLA window elapsed since the last status change
  */
-export function getProgressPercentage(complaint: Complaint): number {
-    const slaHours = SLA_HOURS[complaint.priority] || SLA_HOURS.MEDIUM;
-    const slaDurationMs = slaHours * 60 * 60 * 1000;
-
-    // Use lastStatusChange if available, otherwise use createdAt
-    const lastChange = complaint.lastStatusChange
-        ? (complaint.lastStatusChange instanceof Timestamp
-            ? complaint.lastStatusChange.toDate()
-            : new Date(complaint.lastStatusChange))
-        : (complaint.createdAt instanceof Timestamp
-            ? complaint.createdAt.toDate()
-            : new Date(complaint.createdAt));
-
-    const elapsedMs = Date.now() - lastChange.getTime();
-    return Math.min(elapsedMs / slaDurationMs, 1);
-}
-
-/**
- * Get remaining time in hours until SLA breach
- */
-export function getRemainingHours(complaint: Complaint): number {
-    const slaHours = SLA_HOURS[complaint.priority] || SLA_HOURS.MEDIUM;
-    const createdAt = complaint.createdAt instanceof Timestamp
-        ? complaint.createdAt.toDate()
-        : new Date(complaint.createdAt);
-
-    const slaDeadline = new Date(createdAt.getTime() + slaHours * 60 * 60 * 1000);
-    const remainingMs = slaDeadline.getTime() - Date.now();
-    return remainingMs / (60 * 60 * 1000); // Convert to hours
+export function getProgressPercentage(complaint: StallInput, now: number = Date.now()): number {
+    const sla = calculateSLA(complaint, now);
+    const windowMs = sla.assignedHours * 60 * 60 * 1000;
+    const lastChange = toMillis(complaint.lastStatusChange) ?? toMillis(complaint.createdAt) ?? now;
+    return Math.min((now - lastChange) / windowMs, 1);
 }
 
 /**
  * Get stalled status label
  */
-export function getStalledStatusLabel(complaint: Complaint): 'ACTION_REQUIRED' | 'DELAYED' | null {
-    if (!isComplaintStalled(complaint)) {
-        return null;
-    }
-
-    if (isSLABreached(complaint)) {
-        return 'DELAYED';
-    }
-
-    return 'ACTION_REQUIRED';
+export function getStalledStatusLabel(complaint: StallInput, now: number = Date.now()): 'ACTION_REQUIRED' | 'DELAYED' | null {
+    if (!isComplaintStalled(complaint, now)) return null;
+    return isSLABreached(complaint, now) ? 'DELAYED' : 'ACTION_REQUIRED';
 }
 
 /**
  * Filter stalled complaints from a list
  */
-export function getStalledComplaints(complaints: Complaint[]): Complaint[] {
-    return complaints.filter(isComplaintStalled);
-}
-
-/**
- * Check if complaint needs SLA warning email (within 20% of deadline)
- */
-export function needsSLAWarning(complaint: Complaint): boolean {
-    if (complaint.status === 'RESOLVED') {
-        return false;
-    }
-
-    const remainingHours = getRemainingHours(complaint);
-    const slaHours = SLA_HOURS[complaint.priority] || SLA_HOURS.MEDIUM;
-    const warningThreshold = slaHours * 0.2; // 20% of SLA duration
-
-    return remainingHours > 0 && remainingHours <= warningThreshold;
-}
-
-/**
- * Get human-readable time remaining
- */
-export function formatTimeRemaining(hours: number): string {
-    if (hours < 0) {
-        const overdue = Math.abs(hours);
-        if (overdue < 1) return `${Math.round(overdue * 60)} minutes overdue`;
-        if (overdue < 24) return `${Math.round(overdue)} hours overdue`;
-        return `${Math.round(overdue / 24)} days overdue`;
-    }
-
-    if (hours < 1) return `${Math.round(hours * 60)} minutes`;
-    if (hours < 24) return `${Math.round(hours)} hours`;
-    return `${Math.round(hours / 24)} days`;
-}
-
-/**
- * Get SLA deadline date
- */
-export function getSLADeadline(complaint: Complaint): Date {
-    const slaHours = SLA_HOURS[complaint.priority] || SLA_HOURS.MEDIUM;
-    const createdAt = complaint.createdAt instanceof Timestamp
-        ? complaint.createdAt.toDate()
-        : new Date(complaint.createdAt);
-
-    return new Date(createdAt.getTime() + slaHours * 60 * 60 * 1000);
+export function getStalledComplaints<T extends StallInput>(complaints: T[], now: number = Date.now()): T[] {
+    return complaints.filter(c => isComplaintStalled(c, now));
 }

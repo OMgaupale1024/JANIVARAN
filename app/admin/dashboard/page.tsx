@@ -2,183 +2,142 @@
 
 import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import {
-    LayoutDashboard, Users, AlertTriangle, CheckCircle, Search, Bell,
-    FileText, ArrowUpRight, Clock, ChevronDown, RefreshCw, Play, FastForward,
-    MapPin, Camera, X, ShieldAlert, CheckSquare, Eye, Trash2
+    LayoutDashboard, AlertTriangle, Bell, FileText, Clock, Play,
+    MapPin, Camera, X, ShieldAlert, Eye, CheckSquare, LogOut
 } from 'lucide-react';
-import { Engines } from '@/lib/engines';
 import { Grievance } from '@/lib/types';
 import DemoControls from '@/components/DemoControls';
+import { useAuth } from '@/lib/auth-context';
+import { apiFetch } from '@/lib/api-client';
+import { listenToComplaints } from '@/lib/services/complaint-query-service';
+import { complaintToGrievance } from '@/lib/utils/type-mappers';
+import { calculateSLA, formatRemainingTime } from '@/lib/services/sla-service';
+
+const slaFor = (g: Grievance, now: Date) => calculateSLA({
+    createdAt: g.submittedAt,
+    sla: { deadline: g.slaDeadline, assignedHours: g.slaHours },
+    status: g.status === 'RESOLVED' ? 'resolved' : 'open',
+    resolvedAt: g.resolvedAt,
+}, now.getTime());
 
 export default function AdminDashboard() {
+    const router = useRouter();
+    const { user, loading: authLoading, signOut } = useAuth();
     const [currentTime, setCurrentTime] = useState(new Date());
     const [grievances, setGrievances] = useState<Grievance[]>([]);
-    const [stats, setStats] = useState({ total: 0, onTrack: 0, atRisk: 0, breached: 0, escalated: 0 });
+    const [listenError, setListenError] = useState<string | null>(null);
+    const [actionError, setActionError] = useState<string | null>(null);
 
-    // RBAC & State
-    const [role, setRole] = useState<'AUTHORITY' | 'OFFICIAL'>('OFFICIAL');
+    // RBAC comes from the signed-in user's trusted profile
+    const isStaff = user?.role === 'admin' || user?.role === 'official';
+    const role: 'AUTHORITY' | 'OFFICIAL' = user?.role === 'admin' ? 'AUTHORITY' : 'OFFICIAL';
+    const userDepartment = user?.role === 'official' ? user.department ?? null : null;
+    const missingDepartment = user?.role === 'official' && !userDepartment;
+    const loadError = missingDepartment
+        ? 'Your official account has no department assigned. Please contact an administrator.'
+        : listenError;
+
     const [filter, setFilter] = useState<'ALL' | 'ESCALATED'>('ALL');
     const [selectedGrievance, setSelectedGrievance] = useState<Grievance | null>(null);
     const [view, setView] = useState<'dashboard' | 'all-complaints'>('dashboard');
-    const [userDepartment, setUserDepartment] = useState<string | null>(null);
 
-    // Fetch Data
-    const fetchGrievances = async () => {
-        try {
-            const res = await fetch('/api/grievances');
-            if (res.ok) {
-                const data = await res.json();
-                setGrievances(data);
-            }
-        } catch (e) {
-            console.error("Failed to fetch", e);
-        }
-    };
-
-    // Initial Load & Real-Time Listener
+    // Deny access to anyone who is not an official or authority
     useEffect(() => {
-        // Load role and department from storage
-        const storedRole = localStorage.getItem('adminRole') as 'AUTHORITY' | 'OFFICIAL';
-        const storedDepartment = localStorage.getItem('userDepartment');
+        if (!authLoading && !isStaff) router.replace('/admin/login');
+    }, [authLoading, isStaff, router]);
 
-        if (storedRole) setRole(storedRole);
-        if (storedDepartment) setUserDepartment(storedDepartment);
+    // Real-time listener scoped by role; never falls back to all complaints
+    useEffect(() => {
+        if (!user || !isStaff || missingDepartment) return;
 
-        // Set up real-time Firestore listener with role-based filtering
-        const { listenToComplaints } = require('@/lib/services/complaint-query-service');
-        const { complaintToGrievance } = require('@/lib/utils/type-mappers');
-
-        // Determine query options based on role
-        const queryOptions: any = storedRole === 'OFFICIAL' && storedDepartment
-            ? { role: 'official', department: storedDepartment }
-            : { role: 'admin' };
+        const options = user.role === 'admin'
+            ? { role: 'admin' as const }
+            : { role: 'official' as const, department: user.department as string };
 
         const unsubscribe = listenToComplaints(
-            queryOptions,
-            (complaints: any[]) => {
-                // Convert Complaint to Grievance format
-                const grievances: Grievance[] = complaints.map(complaintToGrievance);
-                setGrievances(grievances);
-            }
+            options,
+            (complaints) => {
+                setGrievances(complaints.map(complaintToGrievance));
+                setListenError(null);
+            },
+            () => setListenError('Could not load complaints. Check your access or connection and refresh.')
         );
 
-        // Update current time every second
-        const timer = setInterval(() => {
-            setCurrentTime(new Date());
-        }, 1000);
+        return unsubscribe;
+    }, [user, isStaff, missingDepartment]);
 
-        return () => {
-            unsubscribe();
-            clearInterval(timer);
-        };
+    // Update current time every second
+    useEffect(() => {
+        const timer = setInterval(() => setCurrentTime(new Date()), 1000);
+        return () => clearInterval(timer);
     }, []);
 
-    // Recalculate Stats
-    useEffect(() => {
-        const { calculateSLA } = require('@/lib/services/sla-service');
-        // Total should only be active complaints (not resolved)
-        const activeComplaints = grievances.filter(g => g.status !== 'RESOLVED');
-        const newStats = { total: activeComplaints.length, onTrack: 0, atRisk: 0, breached: 0, escalated: 0 };
+    // Stats (active complaints only for SLA figures)
+    const stats = { total: 0, onTrack: 0, atRisk: 0, breached: 0, escalated: 0 };
+    grievances.forEach(g => {
+        if (g.status === 'ESCALATED') stats.escalated++;
+        if (g.status === 'RESOLVED') return;
+        stats.total++;
+        const { status } = slaFor(g, currentTime);
+        if (status === 'on-track') stats.onTrack++;
+        else if (status === 'at-risk') stats.atRisk++;
+        else stats.breached++;
+    });
+    const pct = (n: number) => (stats.total ? (n / stats.total) * 100 : 0);
 
-        grievances.forEach(g => {
-            // Count Escalated separately (can be active or resolved, but usually active)
-            if (g.status === 'ESCALATED') newStats.escalated++;
-
-            // Skip resolved for SLA stats
-            if (g.status === 'RESOLVED') return;
-
-            // Use new SLA service (need to convert grievance back to complaint format)
-            const complaint = {
-                createdAt: new Date(g.submittedAt),
-                priority: g.priority.toLowerCase() as any
-            };
-            const sla = calculateSLA(complaint as any);
-
-            if (sla.status === 'on-track') newStats.onTrack++;
-            else if (sla.status === 'at-risk') newStats.atRisk++;
-            else if (sla.status === 'breached') newStats.breached++;
-        });
-
-        setStats(newStats);
-    }, [grievances]);
-
-    // Auto-update status when viewed (Moved from render to Effect to prevent dupes)
-    useEffect(() => {
-        if (selectedGrievance && selectedGrievance.status === 'PENDING') {
-            const timer = setTimeout(() => {
-                // Double check status hasn't changed in the meantime
-                if (selectedGrievance.status === 'PENDING') {
-                    updateGrievanceStatus(selectedGrievance.id, 'under-review');
-                }
-            }, 1000);
-            return () => clearTimeout(timer);
-        }
-    }, [selectedGrievance?.id, selectedGrievance?.status]); // Re-run only if ID or Status changes
-
-    // Generic Status Update Handler
-    const updateGrievanceStatus = async (id: string, newStatus: string, actionType: 'updateStatus' | 'assign' = 'updateStatus') => {
-        console.log(`🔍 [updateStatus] ID: ${id}, Status: ${newStatus}`);
-
+    // Generic update handler: status and/or priority are saved together server-side
+    const updateGrievance = async (id: string, changes: { status?: string; priority?: string }) => {
         const grievance = grievances.find(g => g.id === id);
         if (!grievance) return;
+        setActionError(null);
 
         // Optimistic Update
-        const updatedGrievance = { ...grievance, status: newStatus.toUpperCase().replace('-', '_') as any };
-
-        // Handle specific priority update case
-        if (newStatus === 'critical') {
-            updatedGrievance.priority = 'CRITICAL' as any;
-            // Keep existing status unless explicitly changing it
-            updatedGrievance.status = 'IN_PROGRESS' as any;
-        }
+        const updatedGrievance: Grievance = { ...grievance };
+        if (changes.status) updatedGrievance.status = changes.status.toUpperCase().replace('-', '_') as Grievance['status'];
+        if (changes.priority) updatedGrievance.priority = changes.priority.toUpperCase() as Grievance['priority'];
 
         setGrievances(prev => prev.map(g => g.id === id ? updatedGrievance : g));
-        if (selectedGrievance && selectedGrievance.id === id) {
-            const updatedSelected = { ...selectedGrievance, ...updatedGrievance };
-            setSelectedGrievance(updatedSelected);
-        }
+        setSelectedGrievance(prev => prev && prev.id === id ? updatedGrievance : prev);
 
         try {
-            const body: any = {
-                action: actionType,
-                user: {
-                    id: 'admin-user',
-                    name: role === 'AUTHORITY' ? 'Authority Admin' : 'Field Official',
-                    role: role.toLowerCase()
-                }
-            };
-
-            if (newStatus === 'critical') {
-                body.priority = 'critical';
-                body.status = 'in-progress';
-            } else {
-                body.status = newStatus;
-            }
-
-            const response = await fetch(`/api/complaints/${id}`, {
+            await apiFetch(`/api/complaints/${id}`, {
                 method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(body)
+                body: JSON.stringify({ action: 'updateStatus', ...changes }),
             });
-
-            const result = await response.json();
-            if (!result.success) throw new Error(result.error);
-            console.log('✅ [updateStatus] Success');
-
         } catch (error) {
-            console.error('❌ [updateStatus] Failed:', error);
+            console.error('Update failed:', error);
+            setActionError(error instanceof Error ? error.message : 'Update failed');
             // Revert
             setGrievances(prev => prev.map(g => g.id === id ? grievance : g));
-            if (selectedGrievance && selectedGrievance.id === id) {
-                setSelectedGrievance(grievance);
-            }
+            setSelectedGrievance(prev => prev && prev.id === id ? grievance : prev);
         }
     };
 
-    const handlePrioritize = (id: string) => updateGrievanceStatus(id, 'critical');
-    const handleClose = (id: string) => updateGrievanceStatus(id, 'resolved');
-    const handleInProgress = (id: string) => updateGrievanceStatus(id, 'in-progress');
+    // Auto-mark as under review when an official opens a pending complaint
+    const selectedId = selectedGrievance?.id;
+    const selectedStatus = selectedGrievance?.status;
+    useEffect(() => {
+        if (!selectedId || selectedStatus !== 'PENDING') return;
+        const timer = setTimeout(() => updateGrievance(selectedId, { status: 'under-review' }), 1000);
+        return () => clearTimeout(timer);
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- re-run only when the selection or its status changes
+    }, [selectedId, selectedStatus]);
+
+    const handlePrioritize = (id: string) => {
+        const g = grievances.find(x => x.id === id);
+        // Keep an already-active status; otherwise move it into progress
+        const status = g && ['IN_PROGRESS', 'ESCALATED'].includes(g.status) ? undefined : 'in-progress';
+        return updateGrievance(id, { priority: 'critical', ...(status ? { status } : {}) });
+    };
+    const handleClose = (id: string) => updateGrievance(id, { status: 'resolved' });
+    const handleInProgress = (id: string) => updateGrievance(id, { status: 'in-progress' });
+
+    const handleSignOut = async () => {
+        await signOut();
+        router.replace('/admin/login');
+    };
 
     // Filter Logic
     const filteredGrievances = grievances.filter(g => {
@@ -187,17 +146,26 @@ export default function AdminDashboard() {
         return true; // ALL (Active)
     });
 
+    if (authLoading || !isStaff) {
+        return (
+            <div className="min-h-screen flex items-center justify-center bg-gray-50 text-gray-500 text-sm">
+                Checking access…
+            </div>
+        );
+    }
+
     // Helper to format SLA Timer
     const getSLADisplay = (g: Grievance) => {
-        const { calculateSLA, formatRemainingTime } = require('@/lib/services/sla-service');
+        if (g.status === 'RESOLVED') {
+            return (
+                <div className="text-right">
+                    <div className="font-mono font-bold text-gray-400">Done</div>
+                    <div className="text-[10px] uppercase font-bold text-gray-400">Closed</div>
+                </div>
+            );
+        }
 
-        // Convert grievance to complaint format for SLA calculation
-        const complaint = {
-            createdAt: new Date(g.submittedAt),
-            priority: g.priority.toLowerCase() as any
-        };
-
-        const { status, remainingHours } = calculateSLA(complaint as any);
+        const { status, remainingHours } = slaFor(g, currentTime);
         const timeStr = formatRemainingTime(remainingHours);
 
         if (status === 'breached') {
@@ -214,21 +182,13 @@ export default function AdminDashboard() {
                     <div className="text-[10px] uppercase font-bold text-yellow-500">At Risk</div>
                 </div>
             );
-        } else if (g.status === 'RESOLVED') {
-            return (
-                <div className="text-right">
-                    <div className="font-mono font-bold text-gray-400">Done</div>
-                    <div className="text-[10px] uppercase font-bold text-gray-400">Closed</div>
-                </div>
-            );
-        } else {
-            return (
-                <div className="text-right">
-                    <div className="font-mono font-bold text-green-600">{timeStr}</div>
-                    <div className="text-[10px] uppercase font-bold text-green-500">On Track</div>
-                </div>
-            );
         }
+        return (
+            <div className="text-right">
+                <div className="font-mono font-bold text-green-600">{timeStr}</div>
+                <div className="text-[10px] uppercase font-bold text-green-500">On Track</div>
+            </div>
+        );
     };
 
     return (
@@ -284,12 +244,15 @@ export default function AdminDashboard() {
                         <div className={`w-8 h-8 rounded-full border border-white/20 flex items-center justify-center font-bold text-xs ${role === 'AUTHORITY' ? 'bg-purple-600' : 'bg-green-600'}`}>
                             {role === 'AUTHORITY' ? 'AD' : 'OF'}
                         </div>
-                        <div>
-                            <div className="text-sm font-bold">{role === 'AUTHORITY' ? 'Authority Admin' : 'Field Official'}</div>
+                        <div className="flex-1 min-w-0">
+                            <div className="text-sm font-bold truncate">{user?.displayName || (role === 'AUTHORITY' ? 'Authority Admin' : 'Field Official')}</div>
                             <div className="text-xs text-white/50">
                                 {role === 'OFFICIAL' && userDepartment ? `${userDepartment} Dept` : 'All Departments'} • Active
                             </div>
                         </div>
+                        <button onClick={handleSignOut} className="p-2 text-white/60 hover:text-white rounded-lg hover:bg-white/10" title="Sign out" aria-label="Sign out">
+                            <LogOut size={16} />
+                        </button>
                     </div>
                 </div>
             </aside>
@@ -311,13 +274,19 @@ export default function AdminDashboard() {
                         </p>
                     </div>
                     <div className="flex gap-4 items-center">
-                        <DemoControls />
+                        {process.env.NODE_ENV !== 'production' && role === 'AUTHORITY' && <DemoControls />}
                         <button className="p-2 bg-white text-noble-dark border border-gray-200 rounded-lg hover:bg-gray-50 relative">
                             <Bell size={20} />
                             {stats.breached > 0 && <span className="absolute top-1 right-1 w-2.5 h-2.5 bg-red-500 border-2 border-white rounded-full"></span>}
                         </button>
                     </div>
                 </header>
+
+                {(loadError || actionError) && (
+                    <div role="alert" className="mb-6 p-4 bg-red-50 border border-red-200 rounded-xl text-sm text-red-700">
+                        {loadError || actionError}
+                    </div>
+                )}
 
                 {/* KPI Cards */}
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-10">
@@ -332,7 +301,7 @@ export default function AdminDashboard() {
                         <div className="text-green-600 text-xs font-bold uppercase tracking-widest mb-2">SLA On Track</div>
                         <div className="text-3xl font-bold text-gray-800">{stats.onTrack}</div>
                         <div className="w-full bg-gray-100 h-1.5 rounded-full mt-3">
-                            <div className="bg-green-500 h-1.5 rounded-full" style={{ width: `${(stats.onTrack / stats.total) * 100}%` }}></div>
+                            <div className="bg-green-500 h-1.5 rounded-full" style={{ width: `${pct(stats.onTrack)}%` }}></div>
                         </div>
                     </div>
 
@@ -341,7 +310,7 @@ export default function AdminDashboard() {
                         <div className="text-yellow-600 text-xs font-bold uppercase tracking-widest mb-2">SLA At Risk</div>
                         <div className="text-3xl font-bold text-gray-800">{stats.atRisk}</div>
                         <div className="w-full bg-gray-100 h-1.5 rounded-full mt-3">
-                            <div className="bg-yellow-500 h-1.5 rounded-full" style={{ width: `${(stats.atRisk / stats.total) * 100}%` }}></div>
+                            <div className="bg-yellow-500 h-1.5 rounded-full" style={{ width: `${pct(stats.atRisk)}%` }}></div>
                         </div>
                     </div>
 
@@ -350,7 +319,7 @@ export default function AdminDashboard() {
                         <div className="text-red-600 text-xs font-bold uppercase tracking-widest mb-2">SLA Breached</div>
                         <div className="text-3xl font-bold text-gray-800">{stats.breached}</div>
                         <div className="w-full bg-gray-100 h-1.5 rounded-full mt-3">
-                            <div className="bg-red-500 h-1.5 rounded-full" style={{ width: `${(stats.breached / stats.total) * 100}%` }}></div>
+                            <div className="bg-red-500 h-1.5 rounded-full" style={{ width: `${pct(stats.breached)}%` }}></div>
                         </div>
                     </div>
                 </div>
@@ -394,7 +363,7 @@ export default function AdminDashboard() {
                                                         {g.title}
                                                         {g.priority === 'CRITICAL' && <ShieldAlert size={14} className="text-red-500 fill-red-100" />}
                                                     </div>
-                                                    <div className="text-xs text-gray-400">{g.id} • {g.location}</div>
+                                                    <div className="text-xs text-gray-400">{g.trackingId || g.id} • {g.location}</div>
                                                 </td>
                                                 <td className="px-6 py-4">
                                                     <span className="bg-gray-100 text-gray-600 px-2 py-1 rounded text-xs font-bold">{g.category}</span>
@@ -442,14 +411,14 @@ export default function AdminDashboard() {
                         {/* Modal Header */}
                         <div className="p-6 border-b border-gray-100 flex justify-between items-start bg-gray-50">
                             <div>
-                                <div className="text-xs font-bold uppercase tracking-widest text-gray-400 mb-2">{selectedGrievance.id}</div>
+                                <div className="text-xs font-bold uppercase tracking-widest text-gray-400 mb-2">{selectedGrievance.trackingId || selectedGrievance.id}</div>
                                 <h2 className="text-2xl font-serif font-bold text-noble-dark">{selectedGrievance.title}</h2>
                                 <div className="flex items-center gap-3 mt-2">
                                     <span className="bg-gray-200 text-gray-700 px-2 py-1 rounded text-xs font-bold">{selectedGrievance.category}</span>
                                     {selectedGrievance.priority === 'CRITICAL' && <span className="bg-red-100 text-red-700 px-2 py-1 rounded text-xs font-bold">CRITICAL PRIORITY</span>}
                                 </div>
                             </div>
-                            <button onClick={() => setSelectedGrievance(null)} className="p-2 hover:bg-gray-200 rounded-full transition-colors">
+                            <button onClick={() => setSelectedGrievance(null)} className="p-2 hover:bg-gray-200 rounded-full transition-colors" aria-label="Close details">
                                 <X size={24} className="text-gray-500" />
                             </button>
                         </div>
@@ -461,14 +430,23 @@ export default function AdminDashboard() {
                             <div className="space-y-6">
                                 <div>
                                     <h4 className="text-sm font-bold uppercase tracking-widest text-gray-500 mb-3 flex items-center gap-2">
-                                        <Camera size={16} /> Photo Evidence (Mock)
+                                        <Camera size={16} /> Photo Evidence
                                     </h4>
-                                    <div className="aspect-video bg-gray-200 rounded-xl flex items-center justify-center border-2 border-dashed border-gray-300 relative overflow-hidden group">
-                                        <div className="absolute inset-0 bg-gradient-to-t from-black/50 to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-end p-4">
-                                            <span className="text-white text-xs font-bold">Uploaded by Citizen</span>
+                                    {selectedGrievance.photoURLs?.length ? (
+                                        <div className="grid grid-cols-2 gap-2">
+                                            {selectedGrievance.photoURLs.map((url, i) => (
+                                                <a key={url} href={url} target="_blank" rel="noopener noreferrer" className="block aspect-video rounded-xl overflow-hidden border border-gray-200 bg-gray-100">
+                                                    {/* eslint-disable-next-line @next/next/no-img-element -- private evidence must not pass through the shared image optimizer cache */}
+                                                    <img src={url} alt={`Evidence photo ${i + 1} uploaded by citizen`} className="w-full h-full object-cover" />
+                                                </a>
+                                            ))}
                                         </div>
-                                        <Camera size={48} className="text-gray-400" />
-                                    </div>
+                                    ) : (
+                                        <div className="aspect-video bg-gray-200 rounded-xl flex flex-col items-center justify-center border-2 border-dashed border-gray-300 text-gray-400">
+                                            <Camera size={48} />
+                                            <span className="text-xs font-bold mt-2">No photos uploaded</span>
+                                        </div>
+                                    )}
                                 </div>
 
                                 <div>
@@ -523,26 +501,13 @@ export default function AdminDashboard() {
                                                 </button>
 
                                                 <button
-                                                    onClick={async () => {
-                                                        if (confirm('Are you sure you want to PERMANENTLY DELETE this complaint? This action cannot be undone.')) {
-                                                            try {
-                                                                const res = await fetch(`/api/complaints/${selectedGrievance.id}`, { method: 'DELETE' });
-                                                                if (res.ok) {
-                                                                    setGrievances(prev => prev.filter(g => g.id !== selectedGrievance.id));
-                                                                    setSelectedGrievance(null);
-                                                                } else {
-                                                                    alert('Failed to delete complaint');
-                                                                }
-                                                            } catch (e) {
-                                                                console.error("Delete failed", e);
-                                                                alert('Error deleting complaint');
-                                                            }
-                                                        }
-                                                    }}
-                                                    className="w-full flex items-center justify-between p-4 bg-red-50 border border-red-200 rounded-lg hover:bg-red-100 hover:border-red-300 text-red-700 transition-all mt-4"
+                                                    onClick={() => updateGrievance(selectedGrievance.id, { status: 'under-review' })}
+                                                    disabled={selectedGrievance.status === 'UNDER_REVIEW' || selectedGrievance.status === 'RESOLVED'}
+                                                    className="w-full flex items-center justify-between p-4 bg-amber-50 border border-amber-200 rounded-lg hover:bg-amber-100 hover:border-amber-300 text-amber-800 transition-all mt-4 disabled:opacity-50 disabled:bg-gray-100 disabled:border-gray-200 disabled:text-gray-400 disabled:cursor-not-allowed group"
+                                                    title="Flag this complaint for review (e.g., if it appears fake or invalid)"
                                                 >
-                                                    <span className="font-bold">Delete Complaint</span>
-                                                    <Trash2 size={20} />
+                                                    <span className="font-bold">Flag for Review</span>
+                                                    <AlertTriangle size={20} className="group-hover:scale-110 transition-transform" />
                                                 </button>
                                             </>
                                         )}
@@ -555,15 +520,9 @@ export default function AdminDashboard() {
                                         <Clock size={24} className="text-gray-400" />
                                         <div>
                                             <div className="text-2xl font-mono font-bold text-noble-dark">
-                                                {(() => {
-                                                    const { calculateSLA, formatRemainingTime } = require('@/lib/services/sla-service');
-                                                    const complaint = {
-                                                        createdAt: new Date(selectedGrievance.submittedAt),
-                                                        priority: selectedGrievance.priority.toLowerCase() as any
-                                                    };
-                                                    const { remainingHours } = calculateSLA(complaint as any);
-                                                    return formatRemainingTime(remainingHours);
-                                                })()}
+                                                {selectedGrievance.status === 'RESOLVED'
+                                                    ? 'Done'
+                                                    : formatRemainingTime(slaFor(selectedGrievance, currentTime).remainingHours)}
                                             </div>
                                             <div className="text-xs text-gray-500 uppercase font-bold">Time Remaining</div>
                                         </div>

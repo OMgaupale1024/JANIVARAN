@@ -7,36 +7,38 @@
 ## 🌟 Key Features
 
 ### 👤 For Citizens
--   **Easy Complaint Filing**: Intuitive form with photo evidence upload.
--   **Real-time Tracking**: Visual timeline of complaint progress (Pending → Under Review → In Progress → Resolved).
+-   **Easy Complaint Filing**: Intuitive form with photo evidence upload (JPG/PNG/WebP, up to 3 photos × 5MB).
+-   **Real-time Tracking**: Visual timeline of complaint progress (Pending → Under Review → In Progress → Resolved). Anyone with a tracking ID can see a redacted status view at `/track`.
 -   **SLA Monitoring**: See transparent deadlines. If a complaint is overdue, it's visually flagged.
 -   **AI Support Chat**: 24/7 AI assistant to guide you through the process.
 -   **Instant Feedback**: "Rate Service" option upon resolution to ensure accountability.
--   **Control**: Ability to delete or withdraw complaints.
+-   **Control**: Withdraw a complaint while it is still Pending or Under Review (it is closed, not erased, so the audit trail survives).
 
 ### 👮‍♂️ For Officials & Admins
 -   **Unified Dashboard**: High-level stats on Total, Pending, and Breached complaints.
 -   **Automated Workflow**: Status updates to "Under Review" automatically when viewed.
--   **Simulation Engine**: Tools to simulate time passage (`+1 Hour`) and force SLA breaches to test escalation protocols.
--   **Role-Based Access**:
-    -   *Officials*: Update status, mark in-progress.
-    -   *Authority*: Exclusive rights to **Resolve** or **Delete** complaints.
+-   **Simulation Engine** (development only): Simulate time passage (`+1 Hour`) and force SLA breaches on complaints marked `testData: true`. Disabled in production builds.
+-   **Role-Based Access** (enforced server-side and in Firestore rules):
+    -   *Officials*: See and work only complaints routed to their department (mark Under Review / In Progress).
+    -   *Authority* (admin): All departments; exclusive rights to **Resolve/Close**, change **Priority**, **Assign**, and permanently **Delete** complaints.
 -   **Smart Notifications**: Automated emails with timestamps for every status change.
 
 ### 🤖 Tech Stack
--   **Frontend**: Next.js 14, React, Tailwind CSS (Noble Dark/Forest Theme).
+-   **Frontend**: Next.js 16, React 19, Tailwind CSS (Noble Dark/Forest Theme).
 -   **Backend**: Next.js API Routes, Firebase Admin SDK.
 -   **Database**: Google Firestore (NoSQL).
--   **Authentication**: Firebase Auth.
+-   **Authentication**: Firebase Auth (ID tokens verified on every API call).
+-   **File Storage**: Firebase Storage (complaint photo evidence).
 -   **Email Service**: Nodemailer (SMTP).
 -   **State Management**: React Context API.
 
 ## 🚀 Getting Started
 
 ### Prerequisites
--   Node.js 18+
--   Firebase Project (Firestore & Auth enabled)
--   SMTP Server Credentials (e.g., Gmail App Password)
+-   Node.js 20+ (tested with Node 26)
+-   Firebase project with Firestore, Authentication (Email/Password, Google) and Storage enabled
+-   SMTP credentials for email (optional; without them emails are reported as `skipped`)
+-   Java 21+ for the Firebase emulators used by the integration tests (e.g. `brew install openjdk@21`)
 
 ### Installation
 
@@ -46,53 +48,60 @@
     cd JANIVARAN
     ```
 
-2.  **Install dependencies**
+2.  **Install dependencies** (reproducible, from `package-lock.json`)
     ```bash
-    npm install
+    npm ci
     ```
+    `.npmrc` sets `legacy-peer-deps=true` because `react-simple-maps@3` declares React ≤18 peers while the app runs React 19.
 
-3.  **Environment Setup**
-    Create a `.env.local` file in the root directory:
-    ```env
-    # Firebase Client
-    NEXT_PUBLIC_FIREBASE_API_KEY=your_api_key
-    NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=your_project.firebaseapp.com
-    NEXT_PUBLIC_FIREBASE_PROJECT_ID=your_project_id
-    NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=your_bucket.appspot.com
-    NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=your_sender_id
-    NEXT_PUBLIC_FIREBASE_APP_ID=your_app_id
+3.  **Environment Setup**: copy `.env.example` to `.env.local` and fill in your values. Never commit `.env.local` or service-account keys.
+    -   `NEXT_PUBLIC_FIREBASE_*` — web app config from the Firebase console.
+    -   `FIREBASE_PROJECT_ID`, `FIREBASE_CLIENT_EMAIL`, `FIREBASE_PRIVATE_KEY` — service account used by the API routes (Admin SDK). API routes return `503` if these are missing.
+    -   `SMTP_*` — mail server. Set `EMAIL_OVERRIDE_TO` to a test inbox to redirect **all** outgoing mail during testing.
 
-    # Firebase Admin
-    FIREBASE_PROJECT_ID=your_project_id
-    FIREBASE_CLIENT_EMAIL=your_service_account_email
-    FIREBASE_PRIVATE_KEY="your_private_key_with_newlines"
-
-    # Email Service
-    SMTP_HOST=smtp.gmail.com
-    SMTP_PORT=587
-    SMTP_USER=your_email@gmail.com
-    SMTP_PASS=your_app_password
-    NEXT_PUBLIC_APP_URL=http://localhost:3000
-    ```
-
-4.  **Run the development server**
+4.  **Deploy security rules and indexes** to your Firebase project (see [FIREBASE_SETUP.md](FIREBASE_SETUP.md)):
     ```bash
-    npm run dev
+    npx firebase-tools@15.34.0 deploy --only firestore:rules,firestore:indexes,storage --project <your-project-id>
     ```
 
-5.  **Open the App**
-    Visit [http://localhost:3000](http://localhost:3000) for the Citizen Portal.
-    Visit [http://localhost:3000/admin](http://localhost:3000/admin) for the Admin Dashboard.
+5.  **Create staff accounts**: sign up normally, then in the Firebase console set `users/{uid}.role` to `official` (plus `department`, e.g. `Water Department`) or `admin`. Roles can never be set from the app.
+
+6.  **Run**
+    ```bash
+    npm run dev                       # development
+    npm run build && npm run start    # production
+    ```
+    Citizen portal: [http://localhost:3000](http://localhost:3000) · Staff login: [http://localhost:3000/admin/login](http://localhost:3000/admin/login)
+
+### Checks
+```bash
+npm run lint
+npm run typecheck
+npm test                # SLA / policy / validation unit tests
+npm run test:emulator   # Firestore + Storage rules and API tests on local emulators (demo project, no real data)
+```
+
+## 🔐 Security Model
+
+-   Browsers never write complaints. All writes go through API routes that verify the Firebase ID token and read the caller's role/department from the trusted `users/{uid}` record (never from the request body, query string or localStorage).
+-   `firestore.rules` gives browsers read-only, scoped access for live dashboards: citizens their own complaints, officials their department, admins everything. Users can create only a `citizen` profile and can never change `role` or `department`.
+-   `storage.rules` lets citizens upload images (≤5MB, JPG/PNG/WebP) only to `complaints/{their uid}/…`; the server re-checks owner, type and size before attaching evidence.
+-   SLA deadlines are computed once at submission from the category and stored on the complaint; every dashboard reads that stored deadline.
+-   **Withdrawal vs deletion**: a citizen may withdraw their own complaint while it is Pending or Under Review (status becomes `closed`, `closedReason: withdrawn-by-citizen`). Only an Authority may permanently delete; an audit record is kept.
 
 ## 📸 Screenshots
 
-| Citizen Dashboard | Admin Stats |
-| ----------------- | ----------- |
-| *(Add Screenshot)* | *(Add Screenshot)* |
+<div align="center">
+  <img src="./public/screenshots/landing-hero.png" alt="JanNivaran Landing Page" width="100%" />
+  <p><em>Modern, accessible landing page for all citizens</em></p>
+</div>
+
+<div align="center">
+  <h3>Features & Citizen Stories</h3>
+  <img src="./public/screenshots/smart-governance.png" alt="Smart Governance Features" width="48%" />
+  <img src="./public/screenshots/testimonials.png" alt="Citizen Testimonials" width="48%" />
+</div>
 
 ## 🛡️ License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
----
-

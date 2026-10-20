@@ -4,22 +4,39 @@ import React, { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Shield, Lock, Briefcase, UserCheck, ArrowRight } from 'lucide-react';
 import Link from 'next/link';
+import { useAuth } from '@/lib/auth-context';
 
 export default function AdminLogin() {
     const router = useRouter();
+    const { signIn, signOut } = useAuth();
     const [role, setRole] = useState<'OFFICIAL' | 'AUTHORITY'>('OFFICIAL');
+    const [email, setEmail] = useState('');
+    const [password, setPassword] = useState('');
     const [loading, setLoading] = useState(false);
+    const [error, setError] = useState('');
 
-    const handleLogin = (e: React.FormEvent) => {
+    const handleLogin = async (e: React.FormEvent) => {
         e.preventDefault();
         setLoading(true);
+        setError('');
 
-        // Simulate login delay for effect
-        setTimeout(() => {
-            // Save role to local storage for demo purposes
-            localStorage.setItem('adminRole', role);
+        try {
+            // Role comes from the account's trusted profile, not from this form
+            const profile = await signIn(email, password);
+            const expected = role === 'AUTHORITY' ? 'admin' : 'official';
+            if (profile?.role !== expected) {
+                await signOut();
+                setError(role === 'AUTHORITY'
+                    ? 'This account does not have Authority access.'
+                    : 'This account does not have Official access.');
+                setLoading(false);
+                return;
+            }
             router.push('/admin/dashboard');
-        }, 1500);
+        } catch (err) {
+            setError(err instanceof Error ? err.message : 'Failed to sign in.');
+            setLoading(false);
+        }
     };
 
     return (
@@ -46,6 +63,7 @@ export default function AdminLogin() {
                     {/* Role Toggles */}
                     <div className="grid grid-cols-2 bg-gray-50 p-1">
                         <button
+                            type="button"
                             onClick={() => setRole('OFFICIAL')}
                             className={`flex items-center justify-center gap-2 py-3 text-xs font-bold uppercase tracking-wider transition-all rounded-xl ${role === 'OFFICIAL'
                                     ? 'bg-white text-noble-dark shadow-sm ring-1 ring-black/5'
@@ -56,6 +74,7 @@ export default function AdminLogin() {
                             Official
                         </button>
                         <button
+                            type="button"
                             onClick={() => setRole('AUTHORITY')}
                             className={`flex items-center justify-center gap-2 py-3 text-xs font-bold uppercase tracking-wider transition-all rounded-xl ${role === 'AUTHORITY'
                                     ? 'bg-white text-noble-dark shadow-sm ring-1 ring-black/5'
@@ -69,26 +88,36 @@ export default function AdminLogin() {
 
                     <form onSubmit={handleLogin} className="p-8 space-y-6">
 
+                        {error && (
+                            <div role="alert" className="p-3 bg-red-50 border border-red-200 rounded-xl text-sm text-red-600">
+                                {error}
+                            </div>
+                        )}
+
                         <div className="space-y-4">
                             <div>
-                                <label className="block text-xs font-bold text-gray-700 uppercase tracking-widest mb-2">
-                                    Secure ID
+                                <label htmlFor="official-email" className="block text-xs font-bold text-gray-700 uppercase tracking-widest mb-2">
+                                    Official Email
                                 </label>
                                 <div className="relative group">
                                     <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none text-gray-400 group-focus-within:text-noble-dark transition-colors">
                                         <Briefcase size={18} />
                                     </div>
                                     <input
-                                        type="text"
+                                        id="official-email"
+                                        type="email"
+                                        required
+                                        autoComplete="username"
+                                        value={email}
+                                        onChange={(e) => setEmail(e.target.value)}
                                         className="w-full pl-11 pr-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:ring-2 focus:ring-noble-dark/20 focus:border-noble-dark transition-all outline-none text-sm font-medium text-noble-dark placeholder-gray-400"
-                                        placeholder={role === 'OFFICIAL' ? "Start with OFF..." : "Start with AUTH..."}
-                                        defaultValue="DEMO_USER_01"
+                                        placeholder="name@department.gov.in"
                                     />
                                 </div>
                             </div>
 
                             <div>
-                                <label className="block text-xs font-bold text-gray-700 uppercase tracking-widest mb-2">
+                                <label htmlFor="official-password" className="block text-xs font-bold text-gray-700 uppercase tracking-widest mb-2">
                                     Password
                                 </label>
                                 <div className="relative group">
@@ -96,10 +125,14 @@ export default function AdminLogin() {
                                         <Lock size={18} />
                                     </div>
                                     <input
+                                        id="official-password"
                                         type="password"
+                                        required
+                                        autoComplete="current-password"
+                                        value={password}
+                                        onChange={(e) => setPassword(e.target.value)}
                                         className="w-full pl-11 pr-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:ring-2 focus:ring-noble-dark/20 focus:border-noble-dark transition-all outline-none text-sm font-medium text-noble-dark placeholder-gray-400"
                                         placeholder="••••••••"
-                                        defaultValue="password"
                                     />
                                 </div>
                             </div>

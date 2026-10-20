@@ -18,68 +18,48 @@
    - Add your support email
    - Save
 
-### Step 3: Create Firestore Database
+### Step 3: Create Firestore Database and Storage
 
 1. Go to **Firestore Database** → **Create database**
 2. Start in **production mode**
-3. Choose a location (e.g., `us-central1`)
-4. Click **Enable**
+3. Choose location `asia-south1` (matches `firebase.json`)
+4. Go to **Storage** → **Get started** (complaint photo evidence is stored here)
 
 ### Step 4: Get Firebase Configuration
 
-1. Go to **Project Settings** (gear icon)
-2. Scroll to "Your apps" section
-3. Click **Web app** icon (`</>`)
-4. Register app with nickname: `jan-nivaran-web`
-5. Copy the `firebaseConfig` object
+1. Go to **Project Settings** (gear icon) → "Your apps" → Web app (`</>`)
+2. Copy the `firebaseConfig` values into `.env.local` (`NEXT_PUBLIC_FIREBASE_*`)
+3. **Project Settings → Service accounts → Generate new private key** and copy
+   `project_id`, `client_email` and `private_key` into `FIREBASE_PROJECT_ID`,
+   `FIREBASE_CLIENT_EMAIL` and `FIREBASE_PRIVATE_KEY`. Do not commit the key file.
 
 ### Step 5: Configure Environment Variables
 
-1. Create `.env.local` file in project root:
+Copy `.env.example` to `.env.local` and fill in every value (see comments in that file).
+
+### Step 6: Deploy Security Rules, Indexes and Storage Rules
+
+Run against the intended project only (double-check the project ID):
 
 ```bash
-NEXT_PUBLIC_FIREBASE_API_KEY=your_api_key_here
-NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=your_project_id.firebaseapp.com
-NEXT_PUBLIC_FIREBASE_PROJECT_ID=your_project_id
-NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=your_project_id.appspot.com
-NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=your_sender_id
-NEXT_PUBLIC_FIREBASE_APP_ID=your_app_id
+npx firebase-tools@15.34.0 login
+npx firebase-tools@15.34.0 deploy --only firestore:rules,firestore:indexes,storage --project <your-project-id>
 ```
 
-2. Replace values with your Firebase config
+Verify afterwards in the console (**Firestore → Rules**, **Storage → Rules**, **Firestore → Indexes**)
+that the published rules match `firestore.rules` / `storage.rules`. Until they are deployed the
+project keeps whatever rules it had before (the previous rules allowed everyone to read and write).
 
-### Step 6: Deploy Security Rules
+### Step 7: Create Staff Accounts
 
-1. Install Firebase CLI:
-```bash
-npm install -g firebase-tools
-```
+Self-signup always creates a `citizen`. Roles are assigned only by an administrator:
 
-2. Login to Firebase:
-```bash
-firebase login
-```
-
-3. Initialize Firebase in project:
-```bash
-firebase init firestore
-```
-
-4. Select your Firebase project
-5. Use `firestore.rules` as the rules file
-6. Deploy rules:
-```bash
-firebase deploy --only firestore:rules
-```
-
-### Step 7: Create Initial Admin User
-
-After setting up, create your first admin user:
-
-1. Sign up through the app with email/password
-2. Go to Firebase Console → Firestore Database
-3. Find your user document in `users` collection
-4. Edit the document and change `role` field to `"admin"`
+1. The staff member signs up through the app
+2. Firebase Console → Firestore → `users/{uid}`
+3. Set `role` to `"official"` and `department` to the exact department name used on complaints
+   (`Water Department`, `Electricity Board`, `Sanitation Department`, `Public Works Department`,
+   `Transport Department`, `General Administration`), or set `role` to `"admin"` for an Authority
+4. Staff sign in at `/admin/login`
 
 ## 📊 Database Collections
 
@@ -93,81 +73,38 @@ The following collections will be created automatically:
 
 ## 🚀 Testing the Backend
 
-### Test Authentication
+Automated tests run against local emulators with a `demo-` project, so they never touch real data:
 
-```typescript
-import { useAuth } from '@/lib/auth-context';
-
-function MyComponent() {
-  const { signIn, signInWithGoogle, user } = useAuth();
-  
-  // Email/Password sign in
-  await signIn('user@example.com', 'password');
-  
-  // Google sign in
-  await signInWithGoogle();
-}
+```bash
+npm test                # unit tests
+npm run test:emulator   # rules + API integration tests (needs Java 21+)
 ```
 
-### Test Complaint Creation
+API calls from the browser go through `apiFetch` (`lib/api-client.ts`), which attaches the
+signed-in user's ID token:
 
 ```typescript
-import { createComplaint } from '@/lib/services/complaint-service';
+import { apiFetch } from '@/lib/api-client';
 
-const formData = {
-  title: 'Broken Street Light',
-  description: 'Street light on Main St is not working',
-  category: 'Electricity',
-  location: 'Main Street, Block A',
-};
-
-const complaint = await createComplaint(formData, user);
-console.log('Tracking ID:', complaint.trackingId);
-```
-
-### Test Dashboard Stats
-
-```typescript
-import { getDashboardStats } from '@/lib/services/dashboard-service';
-
-const stats = await getDashboardStats();
-console.log('Total complaints:', stats.totalComplaints);
-console.log('SLA breached:', stats.breached);
+const { data } = await apiFetch('/api/complaints', {
+  method: 'POST',
+  body: JSON.stringify({ title: 'Broken Street Light', description: 'Street light on Main St is not working', category: 'Electricity', location: 'Main Street, Block A' }),
+});
+console.log('Tracking ID:', data.trackingId);
 ```
 
 ## 🔒 Security
 
-- All Firestore operations are protected by security rules
-- Role-based access control is enforced
-- Citizens can only view/create their own complaints
-- Officials can view complaints in their department
-- Admins have full access
+- Complaint writes happen only in API routes (Admin SDK) after ID-token verification
+- Firestore rules: citizens read their own complaints, officials their department, admins all; browsers cannot write complaints
+- Users cannot change their own `role` or `department`
+- Storage rules: owners upload images (≤5MB) to `complaints/{uid}/…` only
 
 ## 📝 Next Steps
 
 1. Set up Firebase project and get credentials
 2. Add credentials to `.env.local`
-3. Deploy Firestore security rules
+3. Deploy Firestore, Storage rules and indexes
 4. Create first admin user
 5. Test authentication flows
 6. Start creating complaints!
-
-## 🛠️ Optional: Background Jobs
-
-For production, set up Cloud Functions for:
-
-- **SLA Monitoring**: Run every hour to update SLA status
-- **Auto-Escalation**: Escalate breached complaints
-- **Email Notifications**: Send updates to users
-
-Example Cloud Function:
-
-```typescript
-import { autoEscalateBreachedComplaints } from './services/escalation-service';
-
-export const monitorSLA = functions.pubsub
-  .schedule('every 1 hours')
-  .onRun(async () => {
-    await autoEscalateBreachedComplaints();
-  });
-```

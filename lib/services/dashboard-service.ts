@@ -1,102 +1,58 @@
-import { collection, getDocs, query, where } from 'firebase/firestore';
-import { db } from '../firebase-config';
 import { Complaint, DashboardStats } from '@/types/backend';
+import { calculateSLA, toMillis } from './sla-service';
 
 /**
- * Get dashboard statistics
+ * Dashboard statistics computed from a list of complaints the caller may see.
+ * SLA figures are live (sla-service), not the creation-time snapshot.
  */
-export async function getDashboardStats(): Promise<DashboardStats> {
-    try {
-        const complaintsRef = collection(db, 'complaints');
-        const querySnapshot = await getDocs(complaintsRef);
-
-        const complaints = querySnapshot.docs.map(doc => doc.data() as Complaint);
-
-        const stats: DashboardStats = {
-            totalComplaints: complaints.length,
-            pending: complaints.filter(c => c.status === 'pending').length,
-            inProgress: complaints.filter(c => c.status === 'in-progress').length,
-            resolved: complaints.filter(c => c.status === 'resolved').length,
-            escalated: complaints.filter(c => c.status === 'escalated').length,
-            breached: complaints.filter(c => c.sla.status === 'breached').length,
-            atRisk: complaints.filter(c => c.sla.status === 'at-risk').length,
-            avgResolutionTime: calculateAvgResolutionTime(complaints),
-        };
-
-        return stats;
-    } catch (error) {
-        console.error('Error getting dashboard stats:', error);
-        throw new Error('Failed to get dashboard stats');
-    }
+export function getDashboardStats(complaints: Complaint[], now: number = Date.now()): DashboardStats {
+    const open = complaints.filter(c => !calculateSLA(c, now).closed);
+    return {
+        totalComplaints: complaints.length,
+        pending: complaints.filter(c => c.status === 'pending').length,
+        inProgress: complaints.filter(c => c.status === 'in-progress').length,
+        resolved: complaints.filter(c => c.status === 'resolved').length,
+        escalated: complaints.filter(c => c.status === 'escalated').length,
+        breached: open.filter(c => calculateSLA(c, now).status === 'breached').length,
+        atRisk: open.filter(c => calculateSLA(c, now).status === 'at-risk').length,
+        avgResolutionTime: calculateAvgResolutionTime(complaints),
+    };
 }
 
 /**
- * Calculate average resolution time in hours
+ * Average resolution time in hours
  */
 function calculateAvgResolutionTime(complaints: Complaint[]): number {
-    const resolvedComplaints = complaints.filter(c => c.resolvedAt);
+    const durations = complaints
+        .map(c => {
+            const resolved = toMillis(c.resolvedAt);
+            const created = toMillis(c.createdAt);
+            return resolved !== null && created !== null ? resolved - created : null;
+        })
+        .filter((d): d is number => d !== null);
 
-    if (resolvedComplaints.length === 0) return 0;
-
-    const totalTime = resolvedComplaints.reduce((sum, complaint) => {
-        if (complaint.resolvedAt) {
-            const resolutionTime = complaint.resolvedAt.toMillis() - complaint.createdAt.toMillis();
-            return sum + resolutionTime;
-        }
-        return sum;
-    }, 0);
-
-    const avgMs = totalTime / resolvedComplaints.length;
-    return Math.round(avgMs / (1000 * 60 * 60)); // Convert to hours
+    if (durations.length === 0) return 0;
+    const avgMs = durations.reduce((sum, d) => sum + d, 0) / durations.length;
+    return Math.round(avgMs / (1000 * 60 * 60));
 }
 
 /**
- * Get complaints by department with stats
+ * Complaint counts by department
  */
-export async function getDepartmentStats(): Promise<Record<string, number>> {
-    try {
-        const complaintsRef = collection(db, 'complaints');
-        const querySnapshot = await getDocs(complaintsRef);
-
-        const complaints = querySnapshot.docs.map(doc => doc.data() as Complaint);
-
-        const departmentStats: Record<string, number> = {};
-
-        complaints.forEach(complaint => {
-            const dept = complaint.department;
-            departmentStats[dept] = (departmentStats[dept] || 0) + 1;
-        });
-
-        return departmentStats;
-    } catch (error) {
-        console.error('Error getting department stats:', error);
-        throw new Error('Failed to get department stats');
+export function getDepartmentStats(complaints: Complaint[]): Record<string, number> {
+    const departmentStats: Record<string, number> = {};
+    for (const complaint of complaints) {
+        departmentStats[complaint.department] = (departmentStats[complaint.department] || 0) + 1;
     }
+    return departmentStats;
 }
 
 /**
- * Get SLA compliance rate
+ * Percentage of closed complaints resolved within their SLA deadline
  */
-export async function getSLAComplianceRate(): Promise<number> {
-    try {
-        const complaintsRef = collection(db, 'complaints');
-        const querySnapshot = await getDocs(complaintsRef);
-
-        const complaints = querySnapshot.docs.map(doc => doc.data() as Complaint);
-        const closedComplaints = complaints.filter(c => c.status === 'resolved' || c.status === 'closed');
-
-        if (closedComplaints.length === 0) return 100;
-
-        const compliantComplaints = closedComplaints.filter(c => {
-            if (c.resolvedAt) {
-                return c.resolvedAt.toMillis() <= c.sla.deadline.toMillis();
-            }
-            return false;
-        });
-
-        return Math.round((compliantComplaints.length / closedComplaints.length) * 100);
-    } catch (error) {
-        console.error('Error getting SLA compliance rate:', error);
-        throw new Error('Failed to get SLA compliance rate');
-    }
+export function getSLAComplianceRate(complaints: Complaint[]): number {
+    const closed = complaints.filter(c => calculateSLA(c).closed);
+    if (closed.length === 0) return 100;
+    const compliant = closed.filter(c => calculateSLA(c).status !== 'breached');
+    return Math.round((compliant.length / closed.length) * 100);
 }

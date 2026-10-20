@@ -8,6 +8,9 @@ interface EmailMessage {
   html: string;
 }
 
+// 'skipped' = SMTP not configured; callers report this instead of claiming delivery
+export type DeliveryStatus = 'sent' | 'skipped' | 'failed';
+
 // Create transporter
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST || 'smtp.gmail.com',
@@ -19,23 +22,33 @@ const transporter = nodemailer.createTransport({
   },
 });
 
+// Escape user-supplied text before interpolating it into email HTML
+function esc(value: unknown): string {
+  return String(value ?? '').replace(/[&<>"']/g, ch => `&#${ch.charCodeAt(0)};`);
+}
+
+const ref = (complaint: Complaint) => esc(complaint.trackingId || complaint.id);
+
 // Helper to send email
-async function sendEmail(email: EmailMessage): Promise<void> {
+async function sendEmail(email: EmailMessage): Promise<DeliveryStatus> {
   if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
-    console.warn('⚠️ [EMAIL] SMTP credentials missing. Mocking send:', email.subject);
-    return;
+    console.warn('⚠️ [EMAIL] SMTP credentials missing. Not sent:', email.subject);
+    return 'skipped';
   }
 
   try {
     const info = await transporter.sendMail({
       from: `"JanNivaran" <${process.env.SMTP_USER}>`, // sender address
-      to: email.to,
+      // EMAIL_OVERRIDE_TO routes every message to a test inbox (never real citizens)
+      to: process.env.EMAIL_OVERRIDE_TO || email.to,
       subject: email.subject,
       html: email.html,
     });
     console.log(`📧 [EMAIL SENT] MessageId: ${info.messageId}`);
+    return 'sent';
   } catch (error) {
     console.error('❌ [EMAIL FAILED]', error);
+    return 'failed';
   }
 }
 
@@ -91,12 +104,13 @@ function createEmailTemplate(content: string): string {
 function getStatusBadge(status: ComplaintStatus | string): string {
   const badges: Record<string, string> = {
     'pending': '<span class="status-badge badge-submitted">Pending</span>',
+    'under-review': '<span class="status-badge badge-submitted">Under Review</span>',
     'in-progress': '<span class="status-badge badge-in-progress">In Progress</span>',
     'escalated': '<span class="status-badge badge-escalated">Escalated</span>',
     'resolved': '<span class="status-badge badge-resolved">Resolved</span>',
     'closed': '<span class="status-badge badge-resolved">Closed</span>',
   };
-  return badges[status] || `<span class="status-badge">${status}</span>`;
+  return badges[status] || `<span class="status-badge">${esc(status)}</span>`;
 }
 
 // Format time remaining
@@ -110,11 +124,11 @@ function formatTimeRemaining(hours: number): string {
 // 0. Welcome Email
 export async function sendWelcomeEmail(
   user: { displayName: string; email: string }
-): Promise<void> {
+): Promise<DeliveryStatus> {
   const content = `
     <div class="content">
       <h2 style="color: #2d5a3d; margin-top: 0;">👋 Welcome to JanNivaran!</h2>
-      <p>Dear ${user.displayName},</p>
+      <p>Dear ${esc(user.displayName)},</p>
       <p>Your account has been successfully created. You can now use the JanNivaran portal to file grievances, track their status, and engage with the administration.</p>
       
       <div class="info-box">
@@ -138,14 +152,14 @@ export async function sendWelcomeEmail(
     html: createEmailTemplate(content),
   };
 
-  await sendEmail(email);
+  return sendEmail(email);
 }
 
 // 1. Complaint Submitted Email
 export async function sendComplaintSubmittedEmail(
   complaint: Complaint,
   userEmail: string
-): Promise<void> {
+): Promise<DeliveryStatus> {
   const content = `
     <div class="content">
       <h2 style="color: #2d5a3d; margin-top: 0;">✅ Your Complaint Has Been Submitted</h2>
@@ -154,11 +168,11 @@ export async function sendComplaintSubmittedEmail(
       <div class="info-box">
         <div class="info-row">
           <span class="info-label">Complaint ID:</span>
-          <span class="info-value"><strong>${complaint.id}</strong></span>
+          <span class="info-value"><strong>${ref(complaint)}</strong></span>
         </div>
         <div class="info-row">
           <span class="info-label">Category:</span>
-          <span class="info-value">${complaint.category}</span>
+          <span class="info-value">${esc(complaint.category)}</span>
         </div>
         <div class="info-row">
           <span class="info-label">Status:</span>
@@ -166,7 +180,7 @@ export async function sendComplaintSubmittedEmail(
         </div>
         <div class="info-row">
           <span class="info-label">Priority:</span>
-          <span class="info-value">${complaint.priority}</span>
+          <span class="info-value">${esc(complaint.priority)}</span>
         </div>
       </div>
 
@@ -181,11 +195,11 @@ export async function sendComplaintSubmittedEmail(
 
   const email: EmailMessage = {
     to: userEmail,
-    subject: `Complaint #${complaint.id} - Successfully Submitted`,
+    subject: `Complaint #${complaint.trackingId || complaint.id} - Successfully Submitted`,
     html: createEmailTemplate(content),
   };
 
-  await sendEmail(email);
+  return sendEmail(email);
 }
 
 // 2. Status Change Email
@@ -194,7 +208,7 @@ export async function sendStatusChangeEmail(
   userEmail: string,
   oldStatus: ComplaintStatus,
   newStatus: ComplaintStatus
-): Promise<void> {
+): Promise<DeliveryStatus> {
   const content = `
     <div class="content">
       <h2 style="color: #2d5a3d; margin-top: 0;">📊 Complaint Status Updated</h2>
@@ -203,7 +217,7 @@ export async function sendStatusChangeEmail(
       <div class="info-box">
         <div class="info-row">
           <span class="info-label">Complaint ID:</span>
-          <span class="info-value"><strong>${complaint.id}</strong></span>
+          <span class="info-value"><strong>${ref(complaint)}</strong></span>
         </div>
         <div class="info-row">
           <span class="info-label">Previous Status:</span>
@@ -219,7 +233,7 @@ export async function sendStatusChangeEmail(
         </div>
         <div class="info-row">
           <span class="info-label">Department:</span>
-          <span class="info-value">${complaint.assignedDepartment || 'Not assigned'}</span>
+          <span class="info-value">${esc(complaint.assignedDepartment || 'Not assigned')}</span>
         </div>
       </div>
 
@@ -231,7 +245,7 @@ export async function sendStatusChangeEmail(
           <p style="font-weight: 600; color: #1e293b; margin-bottom: 12px;">How did we do?</p>
           <div style="display: flex; justify-content: center; gap: 12px; margin-bottom: 16px;">
              <!-- Simple Mailto Feedback Link -->
-             <a href="mailto:support@jannivaran.gov.in?subject=Feedback: Complaint %23${complaint.id}&body=I would like to share the following feedback regarding the resolution of my complaint..." 
+             <a href="mailto:support@jannivaran.gov.in?subject=Feedback: Complaint %23${encodeURIComponent(complaint.trackingId || complaint.id)}&body=I would like to share the following feedback regarding the resolution of my complaint..." 
                 style="background-color: #059669; color: white; padding: 10px 20px; text-decoration: none; border-radius: 6px; font-weight: bold; font-size: 14px;">
                 Rate Service & Share Feedback
              </a>
@@ -248,11 +262,11 @@ export async function sendStatusChangeEmail(
 
   const email: EmailMessage = {
     to: userEmail,
-    subject: `Complaint #${complaint.id} - Status Updated to ${newStatus}`,
+    subject: `Complaint #${complaint.trackingId || complaint.id} - Status Updated to ${newStatus}`,
     html: createEmailTemplate(content),
   };
 
-  await sendEmail(email);
+  return sendEmail(email);
 }
 
 // 3. SLA Warning Email
@@ -260,7 +274,7 @@ export async function sendSLAWarningEmail(
   complaint: Complaint,
   userEmail: string,
   remainingHours: number
-): Promise<void> {
+): Promise<DeliveryStatus> {
   const content = `
     <div class="content">
       <h2 style="color: #f59e0b; margin-top: 0;">⚠️ SLA Deadline Approaching</h2>
@@ -269,7 +283,7 @@ export async function sendSLAWarningEmail(
       <div class="warning-box">
         <div class="info-row">
           <span class="info-label">Complaint ID:</span>
-          <span class="info-value"><strong>${complaint.id}</strong></span>
+          <span class="info-value"><strong>${ref(complaint)}</strong></span>
         </div>
         <div class="info-row">
           <span class="info-label">Time Remaining:</span>
@@ -281,7 +295,7 @@ export async function sendSLAWarningEmail(
         </div>
         <div class="info-row">
           <span class="info-label">Department:</span>
-          <span class="info-value">${complaint.assignedDepartment || 'Not assigned'}</span>
+          <span class="info-value">${esc(complaint.assignedDepartment || 'Not assigned')}</span>
         </div>
       </div>
 
@@ -296,18 +310,18 @@ export async function sendSLAWarningEmail(
 
   const email: EmailMessage = {
     to: userEmail,
-    subject: `⚠️ Complaint #${complaint.id} - SLA Deadline Approaching`,
+    subject: `⚠️ Complaint #${complaint.trackingId || complaint.id} - SLA Deadline Approaching`,
     html: createEmailTemplate(content),
   };
 
-  await sendEmail(email);
+  return sendEmail(email);
 }
 
 // 4. SLA Breach Email
 export async function sendSLABreachEmail(
   complaint: Complaint,
   userEmail: string
-): Promise<void> {
+): Promise<DeliveryStatus> {
   const content = `
     <div class="content">
       <h2 style="color: #dc2626; margin-top: 0;">🚨 SLA Deadline Breached - Escalation Triggered</h2>
@@ -316,7 +330,7 @@ export async function sendSLABreachEmail(
       <div class="danger-box">
         <div class="info-row">
           <span class="info-label">Complaint ID:</span>
-          <span class="info-value"><strong>${complaint.id}</strong></span>
+          <span class="info-value"><strong>${ref(complaint)}</strong></span>
         </div>
         <div class="info-row">
           <span class="info-label">Status:</span>
@@ -324,7 +338,7 @@ export async function sendSLABreachEmail(
         </div>
         <div class="info-row">
           <span class="info-label">Original Department:</span>
-          <span class="info-value">${complaint.assignedDepartment || 'Not assigned'}</span>
+          <span class="info-value">${esc(complaint.assignedDepartment || 'Not assigned')}</span>
         </div>
       </div>
 
@@ -346,11 +360,11 @@ export async function sendSLABreachEmail(
 
   const email: EmailMessage = {
     to: userEmail,
-    subject: `🚨 Complaint #${complaint.id} - Escalated Due to SLA Breach`,
+    subject: `🚨 Complaint #${complaint.trackingId || complaint.id} - Escalated Due to SLA Breach`,
     html: createEmailTemplate(content),
   };
 
-  await sendEmail(email);
+  return sendEmail(email);
 }
 
 // 5. Complaint Routed Email
@@ -358,7 +372,7 @@ export async function sendComplaintRoutedEmail(
   complaint: Complaint,
   userEmail: string,
   department: string
-): Promise<void> {
+): Promise<DeliveryStatus> {
   const content = `
     <div class="content">
       <h2 style="color: #2d5a3d; margin-top: 0;">🎯 Complaint Routed to Department</h2>
@@ -367,11 +381,11 @@ export async function sendComplaintRoutedEmail(
       <div class="info-box">
         <div class="info-row">
           <span class="info-label">Complaint ID:</span>
-          <span class="info-value"><strong>${complaint.id}</strong></span>
+          <span class="info-value"><strong>${ref(complaint)}</strong></span>
         </div>
         <div class="info-row">
           <span class="info-label">Assigned Department:</span>
-          <span class="info-value"><strong>${department}</strong></span>
+          <span class="info-value"><strong>${esc(department)}</strong></span>
         </div>
         <div class="info-row">
           <span class="info-label">Status:</span>
@@ -379,11 +393,11 @@ export async function sendComplaintRoutedEmail(
         </div>
         <div class="info-row">
           <span class="info-label">Priority:</span>
-          <span class="info-value">${complaint.priority}</span>
+          <span class="info-value">${esc(complaint.priority)}</span>
         </div>
       </div>
 
-      <p>The ${department} will review your complaint and take appropriate action. You will be notified of any status changes.</p>
+      <p>The ${esc(department)} will review your complaint and take appropriate action. You will be notified of any status changes.</p>
       
       <p style="margin-top: 24px;">
         <a href="${process.env.NEXT_PUBLIC_APP_URL}/citizen/dashboard" class="button">Track Progress</a>
@@ -393,9 +407,9 @@ export async function sendComplaintRoutedEmail(
 
   const email: EmailMessage = {
     to: userEmail,
-    subject: `Complaint #${complaint.id} - Assigned to ${department}`,
+    subject: `Complaint #${complaint.trackingId || complaint.id} - Assigned to ${department}`,
     html: createEmailTemplate(content),
   };
 
-  await sendEmail(email);
+  return sendEmail(email);
 }

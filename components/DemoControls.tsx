@@ -2,6 +2,9 @@
 
 import React from 'react';
 import { FastForward, AlertTriangle, RefreshCw } from 'lucide-react';
+import { apiFetch } from '@/lib/api-client';
+
+// Development-only: shifts complaints marked `testData: true` (see /api/simulation)
 
 export default function DemoControls() {
     const handleAction = async (action: string) => {
@@ -10,20 +13,11 @@ export default function DemoControls() {
         if (action === 'Force Breach') body = { action: 'FORCE_BREACH' };
 
         try {
-            const res = await fetch('/api/simulation', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(body)
-            });
-
-            if (res.ok) {
-                // In a real app we'd use SWR/React Query trigger. For now, reload to see effect.
-                window.location.reload();
-            } else {
-                console.error("Simulation failed");
-            }
+            await apiFetch('/api/simulation', { method: 'POST', body: JSON.stringify(body) });
+            // In a real app we'd use SWR/React Query trigger. For now, reload to see effect.
+            window.location.reload();
         } catch (e) {
-            console.error("Error", e);
+            alert(e instanceof Error ? e.message : 'Simulation failed');
         }
     };
 

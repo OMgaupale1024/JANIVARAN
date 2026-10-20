@@ -19,9 +19,12 @@ import {
     Trash2
 } from 'lucide-react';
 import { useAuth } from '@/lib/auth-context';
-import { getComplaintsByCitizen } from '@/lib/services/complaint-service';
+import { listenToComplaintsByCitizen } from '@/lib/services/complaint-service';
 import { Complaint } from '@/types/backend';
 import { isComplaintStalled, getStalledStatusLabel, getStalledComplaints } from '@/lib/services/stalled-detection-service';
+import { calculateSLA } from '@/lib/services/sla-service';
+import { WITHDRAWABLE_STATUSES } from '@/lib/complaint-policy';
+import { apiFetch } from '@/lib/api-client';
 import StalledComplaintBadge from '@/components/StalledComplaintBadge';
 import InterventionActions from '@/components/InterventionActions';
 
@@ -29,10 +32,12 @@ import SLATracker from '@/components/SLATracker';
 
 export default function CitizenDashboard() {
     const router = useRouter();
-    const { user, signOut } = useAuth();
+    const { user, loading: authLoading, authError, signOut } = useAuth();
     const [sidebarOpen, setSidebarOpen] = useState(false);
     const [complaints, setComplaints] = useState<Complaint[]>([]);
-    const [loading, setLoading] = useState(true);
+    const [loaded, setLoaded] = useState(false);
+    const [listenError, setListenError] = useState<string | null>(null);
+    const loading = !loaded && !listenError;
     const [activeTab, setActiveTab] = useState<'overview' | 'complaints' | 'settings'>('overview');
     const [expandedComplaintId, setExpandedComplaintId] = useState<string | null>(null);
 
@@ -40,31 +45,40 @@ export default function CitizenDashboard() {
         setExpandedComplaintId(prev => prev === id ? null : id);
     };
 
-    // Redirect if not logged in
+    // Redirect if not logged in (only once auth state is known, so refresh keeps the session)
     useEffect(() => {
-        if (!user) {
+        if (!authLoading && !user && !authError) {
             router.push('/citizen');
         }
-    }, [user, router]);
+    }, [authLoading, user, authError, router]);
 
     // Load complaints with real-time updates
     useEffect(() => {
         if (!user) return;
 
-        setLoading(true);
-
-        // Import the listener function
-        const { listenToComplaintsByCitizen } = require('@/lib/services/complaint-service');
-
-        // Set up real-time listener
-        const unsubscribe = listenToComplaintsByCitizen(user.uid, (data: Complaint[]) => {
-            setComplaints(data);
-            setLoading(false);
-        });
+        const unsubscribe = listenToComplaintsByCitizen(
+            user.uid,
+            (data) => {
+                setComplaints(data);
+                setLoaded(true);
+                setListenError(null);
+            },
+            () => setListenError('Could not load your complaints. Please refresh the page.')
+        );
 
         // Cleanup listener on unmount
         return () => unsubscribe();
     }, [user]);
+
+    const handleWithdraw = async (complaint: Complaint) => {
+        if (!confirm('Withdraw this complaint? It will be closed and no further action will be taken.')) return;
+        try {
+            await apiFetch(`/api/complaints/${complaint.id}`, { method: 'DELETE' });
+            // Listener will handle UI update
+        } catch (error) {
+            alert(error instanceof Error ? error.message : 'Failed to withdraw complaint');
+        }
+    };
 
     const handleLogout = async () => {
         await signOut();
@@ -82,6 +96,7 @@ export default function CitizenDashboard() {
     const getStatusColor = (status: string) => {
         switch (status) {
             case 'pending': return 'bg-yellow-100 text-yellow-800 border-yellow-200';
+            case 'under-review': return 'bg-purple-100 text-purple-800 border-purple-200';
             case 'in-progress': return 'bg-blue-100 text-blue-800 border-blue-200';
             case 'resolved': return 'bg-green-100 text-green-800 border-green-200';
             case 'escalated': return 'bg-red-100 text-red-800 border-red-200';
@@ -98,6 +113,9 @@ export default function CitizenDashboard() {
         }
     };
 
+    if (authError) {
+        return <div role="alert" className="min-h-screen flex items-center justify-center p-6 text-red-600">{authError}</div>;
+    }
     if (!user) return null;
 
     return (
@@ -176,7 +194,7 @@ export default function CitizenDashboard() {
             <div className="flex-1 flex flex-col">
                 {/* Mobile Header */}
                 <header className="lg:hidden bg-white shadow-sm p-4 flex items-center justify-between">
-                    <button onClick={() => setSidebarOpen(!sidebarOpen)}>
+                    <button onClick={() => setSidebarOpen(!sidebarOpen)} aria-label={sidebarOpen ? 'Close menu' : 'Open menu'}>
                         {sidebarOpen ? <X size={24} /> : <Menu size={24} />}
                     </button>
                     <h1 className="font-serif text-xl font-bold">JanNivaran</h1>
@@ -185,6 +203,11 @@ export default function CitizenDashboard() {
 
                 {/* Content Area */}
                 <main className="flex-1 p-6 lg:p-8">
+                    {listenError && (
+                        <div role="alert" className="mb-6 p-4 bg-red-50 border border-red-200 rounded-xl text-sm text-red-700">
+                            {listenError}
+                        </div>
+                    )}
                     {/* Overview Tab */}
                     {activeTab === 'overview' && (
                         <div className="space-y-6">
@@ -292,17 +315,26 @@ export default function CitizenDashboard() {
                                                         </div>
                                                         <h4 className="font-semibold text-gray-900 mb-1">{complaint.title}</h4>
                                                         <p className="text-sm text-gray-500 mb-2">{complaint.category} • {complaint.department}</p>
-                                                        <div className="flex items-center gap-2 text-sm">
-                                                            <span className={`font-medium ${getSLAColor(complaint.sla.status)}`}>
-                                                                SLA: {complaint.sla.status.replace('-', ' ')}
-                                                            </span>
-                                                            <span className="text-gray-400">•</span>
-                                                            <span className="text-gray-600">
-                                                                {complaint.sla.remainingHours > 0
-                                                                    ? `${Math.round(complaint.sla.remainingHours)}h remaining`
-                                                                    : 'Overdue'}
-                                                            </span>
-                                                        </div>
+                                                        {(() => {
+                                                            const sla = calculateSLA(complaint);
+                                                            return (
+                                                                <div className="flex items-center gap-2 text-sm">
+                                                                    <span className={`font-medium ${getSLAColor(sla.status)}`}>
+                                                                        SLA: {sla.closed ? 'closed' : sla.status.replace('-', ' ')}
+                                                                    </span>
+                                                                    {!sla.closed && (
+                                                                        <>
+                                                                            <span className="text-gray-400">•</span>
+                                                                            <span className="text-gray-600">
+                                                                                {sla.remainingHours > 0
+                                                                                    ? `${Math.round(sla.remainingHours)}h remaining`
+                                                                                    : 'Overdue'}
+                                                                            </span>
+                                                                        </>
+                                                                    )}
+                                                                </div>
+                                                            );
+                                                        })()}
                                                     </div>
                                                 </div>
 
@@ -378,25 +410,34 @@ export default function CitizenDashboard() {
                                                             <span>{complaint.department}</span>
                                                             <span>•</span>
                                                             <span suppressHydrationWarning>
-                                                                {new Date(complaint.createdAt.toDate()).toLocaleDateString()}
+                                                                {complaint.createdAt?.toDate?.().toLocaleDateString()}
                                                             </span>
                                                         </div>
                                                     </div>
                                                 </div>
-                                                <div className="flex items-center justify-between pt-3 border-t border-gray-100">
-                                                    <div className="flex items-center gap-2 text-sm">
-                                                        <AlertCircle size={16} className={getSLAColor(complaint.sla.status)} />
-                                                        <span className={`font-medium ${getSLAColor(complaint.sla.status)}`}>
-                                                            SLA: {complaint.sla.status.replace('-', ' ')}
-                                                        </span>
-                                                        <span className="text-gray-400">•</span>
-                                                        <span className="text-gray-600">
-                                                            {complaint.sla.remainingHours > 0
-                                                                ? `${Math.round(complaint.sla.remainingHours)} hours remaining`
-                                                                : `Overdue by ${Math.abs(Math.round(complaint.sla.remainingHours))} hours`}
-                                                        </span>
-                                                    </div>
-                                                </div>
+                                                {(() => {
+                                                    const sla = calculateSLA(complaint);
+                                                    return (
+                                                        <div className="flex items-center justify-between pt-3 border-t border-gray-100">
+                                                            <div className="flex items-center gap-2 text-sm">
+                                                                <AlertCircle size={16} className={getSLAColor(sla.status)} />
+                                                                <span className={`font-medium ${getSLAColor(sla.status)}`}>
+                                                                    SLA: {sla.closed ? 'closed' : sla.status.replace('-', ' ')}
+                                                                </span>
+                                                                {!sla.closed && (
+                                                                    <>
+                                                                        <span className="text-gray-400">•</span>
+                                                                        <span className="text-gray-600">
+                                                                            {sla.remainingHours > 0
+                                                                                ? `${Math.round(sla.remainingHours)} hours remaining`
+                                                                                : `Overdue by ${Math.abs(Math.round(sla.remainingHours))} hours`}
+                                                                        </span>
+                                                                    </>
+                                                                )}
+                                                            </div>
+                                                        </div>
+                                                    );
+                                                })()}
 
                                                 {/* Expanded Tracker View */}
                                                 {expandedComplaintId === complaint.id && (
@@ -408,33 +449,25 @@ export default function CitizenDashboard() {
                                                 {/* Intervention Actions for Stalled Complaints */}
                                                 {isComplaintStalled(complaint) && user && (
                                                     <div className="mt-4" onClick={(e) => e.stopPropagation()}>
-                                                        <InterventionActions
-                                                            complaintId={complaint.id}
-                                                            userId={user.uid}
-                                                            userName={user.displayName || user.email || 'User'}
-                                                        />
+                                                        <InterventionActions complaintId={complaint.id} />
                                                     </div>
                                                 )}
 
-                                                {/* Delete Option for Citizen */}
-                                                <div className="mt-4 pt-3 border-t border-gray-100 flex justify-end">
-                                                    <button
-                                                        onClick={(e) => {
-                                                            e.stopPropagation();
-                                                            if (confirm('Are you sure you want to delete this complaint? This action cannot be undone.')) {
-                                                                fetch(`/api/complaints/${complaint.id}`, { method: 'DELETE' })
-                                                                    .then(res => {
-                                                                        if (!res.ok) alert('Failed to delete');
-                                                                        // Listener will handle UI update
-                                                                    });
-                                                            }
-                                                        }}
-                                                        className="text-red-500 text-sm font-medium hover:text-red-700 hover:bg-red-50 px-3 py-1.5 rounded-lg transition-colors flex items-center gap-2"
-                                                    >
-                                                        <Trash2 size={16} />
-                                                        Delete Complaint
-                                                    </button>
-                                                </div>
+                                                {/* Withdraw option: only before work has started (enforced server-side) */}
+                                                {WITHDRAWABLE_STATUSES.includes(complaint.status) && (
+                                                    <div className="mt-4 pt-3 border-t border-gray-100 flex justify-end">
+                                                        <button
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
+                                                                handleWithdraw(complaint);
+                                                            }}
+                                                            className="text-red-500 text-sm font-medium hover:text-red-700 hover:bg-red-50 px-3 py-1.5 rounded-lg transition-colors flex items-center gap-2"
+                                                        >
+                                                            <Trash2 size={16} />
+                                                            Withdraw Complaint
+                                                        </button>
+                                                    </div>
+                                                )}
                                             </div>
                                         ))}
                                     </div>

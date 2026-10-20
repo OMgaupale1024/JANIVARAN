@@ -1,57 +1,40 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createComplaint, getComplaints, getComplaintsByCitizen } from '@/lib/services/complaint-service';
-import { ComplaintFormData } from '@/types/backend';
+import { createComplaintAdmin, listComplaintsFor, serialize } from '@/lib/services/admin/complaint-service-admin';
+import { sendComplaintSubmittedEmail } from '@/lib/services/notification-service';
+import { validateNewComplaint } from '@/lib/complaint-policy';
+import { errorResponse, readJson, requireUser } from '@/lib/server/auth';
 
 /**
  * GET /api/complaints
- * Get all complaints or filter by citizen
+ * Complaints visible to the signed-in user (own / department / all by role)
  */
 export async function GET(request: NextRequest) {
     try {
-        const searchParams = request.nextUrl.searchParams;
-        const citizenId = searchParams.get('citizenId');
-
-        let complaints;
-        if (citizenId) {
-            complaints = await getComplaintsByCitizen(citizenId);
-        } else {
-            complaints = await getComplaints();
-        }
-
-        return NextResponse.json({ success: true, data: complaints });
-    } catch (error: any) {
-        console.error('GET /api/complaints error:', error);
-        return NextResponse.json(
-            { success: false, error: error.message || 'Failed to fetch complaints' },
-            { status: 500 }
-        );
+        const user = await requireUser(request);
+        const complaints = await listComplaintsFor(user);
+        return NextResponse.json({ success: true, data: serialize(complaints) });
+    } catch (error) {
+        return errorResponse(error, 'GET /api/complaints');
     }
 }
 
 /**
  * POST /api/complaints
- * Create a new complaint
+ * Create a complaint for the signed-in user
  */
 export async function POST(request: NextRequest) {
     try {
-        const body = await request.json();
-        const { formData, user } = body;
-
-        if (!formData || !user) {
-            return NextResponse.json(
-                { success: false, error: 'Missing required fields' },
-                { status: 400 }
-            );
+        const user = await requireUser(request);
+        const input = validateNewComplaint(await readJson(request));
+        if (!input.ok) {
+            return NextResponse.json({ success: false, error: input.error }, { status: 400 });
         }
 
-        const complaint = await createComplaint(formData as ComplaintFormData, user);
+        const complaint = await createComplaintAdmin(input.value, user);
+        const notification = await sendComplaintSubmittedEmail(complaint, user.email);
 
-        return NextResponse.json({ success: true, data: complaint }, { status: 201 });
-    } catch (error: any) {
-        console.error('POST /api/complaints error:', error);
-        return NextResponse.json(
-            { success: false, error: error.message || 'Failed to create complaint' },
-            { status: 500 }
-        );
+        return NextResponse.json({ success: true, data: serialize(complaint), notification }, { status: 201 });
+    } catch (error) {
+        return errorResponse(error, 'POST /api/complaints');
     }
 }

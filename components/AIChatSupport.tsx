@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useRef, useEffect } from 'react';
-import { MessageCircle, X, Send, User, Bot, Phone, Mail } from 'lucide-react';
+import { MessageCircle, X, Send, Bot } from 'lucide-react';
 
 interface Message {
     id: string;
@@ -16,12 +16,13 @@ export default function AIChatSupport() {
     const [messages, setMessages] = useState<Message[]>([
         {
             id: '1',
-            text: "Hello! 👋 I'm your JanNivaran AI Assistant. How can I help you with your grievance today?",
+            text: "Hello! 👋 I'm JanNivaran AI. \n\nI can help you file complaints, understand department categories, or track status. What issue are you facing today?",
             sender: 'bot',
             timestamp: new Date()
         }
     ]);
     const messagesEndRef = useRef<HTMLDivElement>(null);
+    const nextId = useRef(2);
 
     const scrollToBottom = () => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -35,7 +36,7 @@ export default function AIChatSupport() {
         if (!input.trim()) return;
 
         const userMessage: Message = {
-            id: Date.now().toString(),
+            id: String(nextId.current++),
             text: input,
             sender: 'user',
             timestamp: new Date()
@@ -55,22 +56,51 @@ export default function AIChatSupport() {
         const lowerText = text.toLowerCase();
         let responseText = '';
 
-        if (lowerText.includes('contact') || lowerText.includes('number') || lowerText.includes('email') || lowerText.includes('call') || lowerText.includes('support')) {
-            responseText = "You can reach our support team directly:\n\n📞 Call: 9322088956\n✉️ Email: ogaupale@gmail.com";
-        } else if (lowerText.includes('file') || lowerText.includes('new') || lowerText.includes('complain') || lowerText.includes('grievance')) {
-            responseText = "To file a new grievance, please click on the 'File Complaint' button on your dashboard or the home page. Make sure to provide clear details and photo evidence if possible.";
-        } else if (lowerText.includes('status') || lowerText.includes('track') || lowerText.includes('check')) {
-            responseText = "You can track the status of your complaints in the 'My Complaints' section of your dashboard. We provide real-time updates on progress and SLA timelines.";
-        } else if (lowerText.includes('delete') || lowerText.includes('remove')) {
-            responseText = "Citizens can delete their complaints from the dashboard. Look for the 'Delete' option in the complaint details. Please note this action is permanent.";
-        } else if (lowerText.includes('hello') || lowerText.includes('hi')) {
-            responseText = "Hello there! How can I assist you with the JanNivaran portal today?";
-        } else {
-            responseText = "I'm here to help! You can ask me about filing complaints, checking status, or getting support contact details. \n\nFor urgent matters, please contact:\n📞 9322088956\n✉️ ogaupale@gmail.com";
+        // 1. Complaint Classification Logic
+        if (lowerText.includes('water') || lowerText.includes('leak') || lowerText.includes('pipe') || lowerText.includes('supply')) {
+            responseText = "For water-related issues like leakage, low pressure, or no supply, this falls under the **Water Department**. \n\nPlease file a complaint with your location and a photo if possible. We will route it immediately.";
+        }
+        else if (lowerText.includes('electricity') || lowerText.includes('power') || lowerText.includes('light') || lowerText.includes('meter') || lowerText.includes('current')) {
+            responseText = "This sounds like an issue for the **Electricity Department**. \n\nWhether it's a power cut, faulty meter, or street light issue, please submit a complaint so we can track it against the SLA.";
+        }
+        else if (lowerText.includes('road') || lowerText.includes('pothole') || lowerText.includes('traffic') || lowerText.includes('signal') || lowerText.includes('transport')) {
+            responseText = "Potholes, broken roads, and traffic signal issues belong to **Road & Transport**. \n\nPlease help us by providing the exact location/landmark when you file the complaint.";
+        }
+        else if (lowerText.includes('garbage') || lowerText.includes('trash') || lowerText.includes('drain') || lowerText.includes('clean') || lowerText.includes('sanitation') || lowerText.includes('waste')) {
+            responseText = "Based on your description, this should be directed to **Sanitation & Waste Management**. \n\nCleanliness is a priority. Please upload a photo of the area to speed up the process.";
+        }
+        else if (lowerText.includes('safety') || lowerText.includes('unsafe') || lowerText.includes('dark') || lowerText.includes('manhole')) {
+            responseText = "Safety is paramount. This belongs to **Public Safety**. \n\nPlease file this immediately. If it's an emergency, please also contact local emergency services.";
+        }
+        else if (lowerText.includes('hospital') || lowerText.includes('ambulance') || lowerText.includes('health') || lowerText.includes('doctor')) {
+            responseText = "For government hospital or ambulance delays, this goes to **Health Services**. \n\nWe treat these with high priority.";
+        }
+
+        // 2. Status & SLA Queries
+        else if (lowerText.includes('status') || lowerText.includes('track') || lowerText.includes('where')) {
+            responseText = "You can track your complaint status in real-time on your dashboard, just like an order delivery 🚚.\n\n**Statuses:**\n• **Submitted**: Received\n• **Assigned**: With an official\n• **In Progress**: Work started\n• **Resolved**: Fixed";
+        }
+        else if (lowerText.includes('sla') || lowerText.includes('time') || lowerText.includes('long') || lowerText.includes('delay')) {
+            responseText = "**SLA (Service Level Agreement)** is the promised time limit for resolution. \n\nIf the time is crossed, the complaint is automatically **Escalated** to senior authorities for deeper review.";
+        }
+
+        // 3. Filing Guidance
+        else if (lowerText.includes('file') || lowerText.includes('new') || lowerText.includes('create') || lowerText.includes('submit')) {
+            responseText = "To file a complaint:\n1. Click **+ File Complaint**\n2. Describe the issue\n3. Select the location\n4. Upload a photo (optional but helpful)\n\nWe will automatically route it to the correct department for you.";
+        }
+
+        // 4. Contact & Escalation
+        else if (lowerText.includes('contact') || lowerText.includes('call') || lowerText.includes('phone') || lowerText.includes('email') || lowerText.includes('talk') || lowerText.includes('support')) {
+            responseText = "You can notify the authority directly if needed.\n\n📞 **Support**: 9322088956\n✉️ **Email**: ogaupale@gmail.com\n\nIf your complaint is stalled, you can also use the 'Escalate' button on the dashboard.";
+        }
+
+        // 5. General Greeting / Unclear
+        else {
+            responseText = "Hello! I am **JanNivaran AI**. \n\nI can help you categorize your complaint, explain the process, or guide you to the right department.\n\nBriefly describe your issue (e.g., 'No water', 'Pothole in Andheri') and I'll help you get started.";
         }
 
         return {
-            id: (Date.now() + 1).toString(),
+            id: String(nextId.current++),
             text: responseText,
             sender: 'bot',
             timestamp: new Date()
@@ -116,8 +146,8 @@ export default function AIChatSupport() {
                             >
                                 <div
                                     className={`max-w-[80%] p-3 rounded-2xl text-sm whitespace-pre-wrap ${msg.sender === 'user'
-                                            ? 'bg-noble-dark text-white rounded-br-none'
-                                            : 'bg-white text-gray-800 border border-gray-200 rounded-bl-none shadow-sm'
+                                        ? 'bg-noble-dark text-white rounded-br-none'
+                                        : 'bg-white text-gray-800 border border-gray-200 rounded-bl-none shadow-sm'
                                         }`}
                                 >
                                     {msg.text}

@@ -3,25 +3,43 @@
 import React, { useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { FileText, Camera, MapPin, Send, ArrowLeft, CheckCircle, Upload, ArrowRight, Loader2 } from 'lucide-react';
+import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { MapPin, Send, ArrowLeft, CheckCircle, Upload, ArrowRight, Loader2, X } from 'lucide-react';
 import { useAuth } from '@/lib/auth-context';
-import { createComplaint } from '@/lib/services/complaint-service';
+import { storage } from '@/lib/firebase-config';
+import { apiFetch } from '@/lib/api-client';
+import { MAX_PHOTOS, MAX_PHOTO_BYTES, PHOTO_CONTENT_TYPES } from '@/lib/complaint-policy';
+
+const EXTENSIONS: Record<string, string> = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' };
+const EMPTY_FORM = { title: '', category: '', description: '', location: '' };
 
 export default function FileComplaintPage() {
     const router = useRouter();
     const { user } = useAuth();
 
     const [step, setStep] = useState(1);
-    const [formData, setFormData] = useState({
-        title: '',
-        category: '',
-        description: '',
-        location: '',
-        files: null
-    });
+    const [formData, setFormData] = useState(EMPTY_FORM);
+    const [files, setFiles] = useState<File[]>([]);
+    const [fileError, setFileError] = useState('');
     const [trackingId, setTrackingId] = useState('');
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
+
+    const handleFiles = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const selected = Array.from(e.target.files ?? []);
+        e.target.value = ''; // allow re-selecting the same file
+        const rejected: string[] = [];
+        const accepted = selected.filter(file => {
+            if (!PHOTO_CONTENT_TYPES.includes(file.type)) rejected.push(`${file.name}: only JPG, PNG or WebP images`);
+            else if (file.size > MAX_PHOTO_BYTES) rejected.push(`${file.name}: larger than 5MB`);
+            else return true;
+            return false;
+        });
+        const room = MAX_PHOTOS - files.length;
+        if (accepted.length > room) rejected.push(`Only ${MAX_PHOTOS} photos can be attached`);
+        setFiles(prev => [...prev, ...accepted.slice(0, room)]);
+        setFileError(rejected.join('. '));
+    };
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -35,18 +53,35 @@ export default function FileComplaintPage() {
         setLoading(true);
         setError('');
 
+        let stage = 'upload';
         try {
-            const complaint = await createComplaint({
-                title: formData.title || `${formData.category} Issue`,
-                description: formData.description,
-                category: formData.category,
-                location: formData.location,
-            }, user);
+            // Upload evidence to the citizen's own folder (Storage rules enforce owner, type and size)
+            const photoURLs: string[] = [];
+            for (const file of files) {
+                const objectRef = ref(storage, `complaints/${user.uid}/${crypto.randomUUID()}/photo.${EXTENSIONS[file.type]}`);
+                await uploadBytes(objectRef, file, { contentType: file.type });
+                photoURLs.push(await getDownloadURL(objectRef));
+            }
 
-            setTrackingId(complaint.trackingId);
+            stage = 'submit';
+            const { data } = await apiFetch<{ data: { trackingId: string } }>('/api/complaints', {
+                method: 'POST',
+                body: JSON.stringify({
+                    title: formData.title,
+                    description: formData.description,
+                    category: formData.category,
+                    location: formData.location,
+                    photoURLs,
+                }),
+            });
+
+            setTrackingId(data.trackingId);
             setStep(4); // Success step
-        } catch (err: any) {
-            setError(err.message || 'Failed to submit complaint. Please try again.');
+        } catch (err) {
+            const message = err instanceof Error ? err.message : '';
+            setError(stage === 'upload'
+                ? `Photo upload failed. Please try again or remove the photos. ${message}`.trim()
+                : message || 'Failed to submit complaint. Please try again.');
         } finally {
             setLoading(false);
         }
@@ -107,9 +142,11 @@ export default function FileComplaintPage() {
                                 )}
                                 <div className="space-y-6">
                                     <div>
-                                        <label className="block text-sm font-medium mb-2">Title (Optional)</label>
+                                        <label htmlFor="complaint-title" className="block text-sm font-medium mb-2">Title (Optional)</label>
                                         <input
+                                            id="complaint-title"
                                             type="text"
+                                            maxLength={120}
                                             className="w-full border border-gray-300 rounded-xl p-4 focus:ring-2 focus:ring-noble-dark focus:border-transparent outline-none"
                                             placeholder="Brief title for the issue"
                                             value={formData.title}
@@ -117,20 +154,26 @@ export default function FileComplaintPage() {
                                         />
                                     </div>
                                     <div>
-                                        <label className="block text-sm font-medium mb-2">Description</label>
+                                        <label htmlFor="complaint-description" className="block text-sm font-medium mb-2">Description</label>
                                         <textarea
+                                            id="complaint-description"
+                                            maxLength={2000}
+                                            aria-describedby="description-help"
                                             className="w-full border border-gray-300 rounded-xl p-4 focus:ring-2 focus:ring-noble-dark focus:border-transparent outline-none h-32"
                                             placeholder="Describe the issue in detail..."
                                             value={formData.description}
                                             onChange={(e) => setFormData({ ...formData, description: e.target.value })}
                                         ></textarea>
+                                        <p id="description-help" className="text-xs text-gray-400 mt-1">At least 10 characters.</p>
                                     </div>
                                     <div>
-                                        <label className="block text-sm font-medium mb-2">Location</label>
+                                        <label htmlFor="complaint-location" className="block text-sm font-medium mb-2">Location</label>
                                         <div className="relative">
                                             <MapPin className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" size={20} />
                                             <input
+                                                id="complaint-location"
                                                 type="text"
+                                                maxLength={300}
                                                 className="w-full border border-gray-300 rounded-xl p-4 pl-12 focus:ring-2 focus:ring-noble-dark focus:border-transparent outline-none"
                                                 placeholder="Enter address or landmark"
                                                 value={formData.location}
@@ -143,7 +186,7 @@ export default function FileComplaintPage() {
                                     </div>
                                     <button
                                         onClick={() => setStep(3)}
-                                        disabled={!formData.description || !formData.location}
+                                        disabled={formData.description.trim().length < 10 || formData.location.trim().length < 3}
                                         className="w-full bg-noble-dark text-white py-4 rounded-xl font-bold text-lg disabled:opacity-50 disabled:cursor-not-allowed hover:bg-opacity-90 transition-all flex items-center justify-center gap-2"
                                     >
                                         Next Step <ArrowRight size={20} />
@@ -159,19 +202,62 @@ export default function FileComplaintPage() {
                                     <p className="text-gray-500">Upload photos (optional) and verify your report.</p>
                                 </div>
 
-                                <div className="border-2 border-dashed border-gray-200 rounded-2xl p-12 text-center hover:bg-gray-50 transition-colors cursor-pointer group">
+                                <label
+                                    htmlFor="photo-upload"
+                                    className={`block border-2 border-dashed border-gray-200 rounded-2xl p-12 text-center transition-colors group focus-within:ring-2 focus-within:ring-noble-dark ${files.length >= MAX_PHOTOS || loading ? 'opacity-50 cursor-not-allowed' : 'hover:bg-gray-50 cursor-pointer'}`}
+                                >
+                                    <input
+                                        id="photo-upload"
+                                        type="file"
+                                        accept={PHOTO_CONTENT_TYPES.join(',')}
+                                        multiple
+                                        className="sr-only"
+                                        onChange={handleFiles}
+                                        disabled={files.length >= MAX_PHOTOS || loading}
+                                        aria-describedby="photo-help"
+                                    />
                                     <div className="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4 group-hover:scale-110 transition-transform">
                                         <Upload className="text-gray-500" size={24} />
                                     </div>
                                     <p className="font-semibold text-gray-700">Click to upload photos</p>
-                                    <p className="text-sm text-gray-400 mt-2">JPG, PNG up to 5MB</p>
-                                </div>
+                                    <p id="photo-help" className="text-sm text-gray-400 mt-2">JPG, PNG or WebP up to 5MB each (max {MAX_PHOTOS})</p>
+                                </label>
+
+                                {fileError && (
+                                    <p role="alert" className="text-sm text-red-600">{fileError}</p>
+                                )}
+
+                                {files.length > 0 && (
+                                    <ul className="space-y-2" aria-label="Selected photos">
+                                        {files.map((file, i) => (
+                                            <li key={`${file.name}-${i}`} className="flex items-center justify-between bg-gray-50 border border-gray-200 rounded-xl px-4 py-2 text-sm">
+                                                <span className="truncate">{file.name} <span className="text-gray-400">({(file.size / 1024 / 1024).toFixed(1)} MB)</span></span>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setFiles(prev => prev.filter((_, j) => j !== i))}
+                                                    disabled={loading}
+                                                    className="p-1 text-gray-500 hover:text-red-600 rounded"
+                                                    aria-label={`Remove ${file.name}`}
+                                                >
+                                                    <X size={16} />
+                                                </button>
+                                            </li>
+                                        ))}
+                                    </ul>
+                                )}
+
+                                {error && (
+                                    <div role="alert" className="p-4 bg-red-50 border border-red-200 rounded-xl">
+                                        <p className="text-sm text-red-600">{error}</p>
+                                    </div>
+                                )}
 
                                 <div className="bg-yellow-50 p-6 rounded-xl border border-yellow-100">
                                     <h3 className="font-bold text-yellow-800 mb-2">Summary</h3>
                                     <ul className="text-sm text-yellow-800/80 space-y-1">
                                         <li><strong>Category:</strong> {formData.category}</li>
                                         <li><strong>Location:</strong> {formData.location}</li>
+                                        <li><strong>Photos:</strong> {files.length}</li>
                                     </ul>
                                 </div>
 
@@ -219,7 +305,7 @@ export default function FileComplaintPage() {
                                     <Link href="/citizen/dashboard" className="bg-noble-dark text-white py-3 rounded-lg font-medium hover:bg-opacity-90 text-center">
                                         Go to Dashboard
                                     </Link>
-                                    <Link href="/file-complaint" onClick={() => { setStep(1); setFormData({ title: '', category: '', description: '', location: '', files: null }); }} className="text-noble-dark font-medium hover:underline">
+                                    <Link href="/file-complaint" onClick={() => { setStep(1); setFormData(EMPTY_FORM); setFiles([]); setFileError(''); }} className="text-noble-dark font-medium hover:underline">
                                         File Another Complaint
                                     </Link>
                                 </div>

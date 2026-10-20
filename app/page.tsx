@@ -2,7 +2,7 @@
 
 import React, { useState } from 'react';
 import Link from 'next/link';
-import { ArrowRight, Shield, Activity, Users, FileText, CheckCircle, Search, Home as HomeIcon } from 'lucide-react';
+import { ArrowRight, Shield, Activity, FileText } from 'lucide-react';
 import ThreeDMap from '@/components/ThreeDMap';
 
 // Testimonial Data
@@ -138,7 +138,7 @@ export default function Home() {
                         Smart Governance for <br /> everyone
                     </h2>
                     <p className="max-w-xl text-lg opacity-70">
-                        At JanNivaran, we believe that civic confidence should be accessible to everyone—whether you're a daily commuter, a business owner, or a community leader.
+                        At JanNivaran, we believe that civic confidence should be accessible to everyone—whether you&apos;re a daily commuter, a business owner, or a community leader.
                     </p>
                 </div>
 
@@ -215,7 +215,7 @@ export default function Home() {
                         <div className="max-w-2xl relative w-full">
                             <div className="h-full border-l-4 border-noble-dark/10 pl-16 py-10 transition-all duration-500 ease-in-out flex flex-col justify-center">
                                 <p key={TESTIMONIALS[activeTestimonial].id} className="text-3xl md:text-4xl font-serif leading-tight mb-8 animate-fade-in">
-                                    "{TESTIMONIALS[activeTestimonial].quote}"
+                                    &ldquo;{TESTIMONIALS[activeTestimonial].quote}&rdquo;
                                 </p>
                                 <div className="flex items-center gap-4 animate-fade-in delay-100">
                                     <div

@@ -1,5 +1,5 @@
 export type Department = 'Water' | 'Electricity' | 'Sanitation' | 'Roads' | 'Other';
-export type GrievanceStatus = 'PENDING' | 'IN_PROGRESS' | 'ESCALATED' | 'RESOLVED' | 'NEW';
+export type GrievanceStatus = 'PENDING' | 'IN_PROGRESS' | 'ESCALATED' | 'RESOLVED' | 'NEW' | 'UNDER_REVIEW';
 export type SLAState = 'ON_TRACK' | 'AT_RISK' | 'BREACHED';
 export type UserRole = 'CITIZEN' | 'OFFICIAL' | 'AUTHORITY';
 export type EscalationLevel = 'NONE' | 'L1_DEPT_HEAD' | 'L2_DISTRICT_DM' | 'L3_STATE_SEC';
@@ -36,6 +36,9 @@ export interface Grievance {
     // Escalation
     escalationLevel: EscalationLevel;
     assignedTo?: string;
+
+    // Evidence (tokenised Firebase Storage download URLs)
+    photoURLs?: string[];
 
     // Audit Trail
     history: GrievanceHistory[];

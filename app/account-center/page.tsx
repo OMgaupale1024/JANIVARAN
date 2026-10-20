@@ -3,7 +3,7 @@
 import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { ArrowLeft, Search, Filter, Package } from 'lucide-react';
+import { ArrowLeft, Search, Package } from 'lucide-react';
 import { useAuth } from '@/lib/auth-context';
 import { getComplaintsByCitizen } from '@/lib/services/complaint-service';
 import { Complaint } from '@/types/backend';
@@ -11,39 +11,36 @@ import SLATracker from '@/components/SLATracker';
 
 export default function AccountCenter() {
     const router = useRouter();
-    const { user } = useAuth();
-    const [complaints, setComplaints] = useState<Complaint[]>([]);
-    const [loading, setLoading] = useState(true);
+    const { user, loading: authLoading } = useAuth();
+    const [complaints, setComplaints] = useState<Complaint[] | null>(null);
+    const [loadError, setLoadError] = useState<string | null>(null);
     const [selectedComplaint, setSelectedComplaint] = useState<Complaint | null>(null);
     const [searchQuery, setSearchQuery] = useState('');
     const [statusFilter, setStatusFilter] = useState<string>('all');
+    const loading = complaints === null && !loadError;
+
+    // Redirect only once auth state is known, so a refresh keeps the session
+    useEffect(() => {
+        if (!authLoading && !user) router.push('/citizen');
+    }, [authLoading, user, router]);
 
     useEffect(() => {
-        if (!user) {
-            router.push('/citizen');
-        } else {
-            loadComplaints();
-        }
-    }, [user, router]);
-
-    const loadComplaints = async () => {
         if (!user) return;
+        let cancelled = false;
+        getComplaintsByCitizen(user.uid)
+            .then(data => {
+                if (cancelled) return;
+                setComplaints(data);
+                setSelectedComplaint(prev => prev ?? data[0] ?? null);
+            })
+            .catch(error => {
+                console.error('Error loading complaints:', error);
+                if (!cancelled) setLoadError('Could not load your complaints. Please refresh the page.');
+            });
+        return () => { cancelled = true; };
+    }, [user]);
 
-        try {
-            setLoading(true);
-            const data = await getComplaintsByCitizen(user.uid);
-            setComplaints(data);
-            if (data.length > 0 && !selectedComplaint) {
-                setSelectedComplaint(data[0]);
-            }
-        } catch (error) {
-            console.error('Error loading complaints:', error);
-        } finally {
-            setLoading(false);
-        }
-    };
-
-    const filteredComplaints = complaints.filter(complaint => {
+    const filteredComplaints = (complaints ?? []).filter(complaint => {
         const matchesSearch = complaint.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
             complaint.trackingId.toLowerCase().includes(searchQuery.toLowerCase());
         const matchesStatus = statusFilter === 'all' || complaint.status === statusFilter;
@@ -53,6 +50,7 @@ export default function AccountCenter() {
     const getStatusColor = (status: string) => {
         switch (status) {
             case 'pending': return 'bg-yellow-100 text-yellow-800 border-yellow-200';
+            case 'under-review': return 'bg-purple-100 text-purple-800 border-purple-200';
             case 'in-progress': return 'bg-blue-100 text-blue-800 border-blue-200';
             case 'resolved': return 'bg-green-100 text-green-800 border-green-200';
             case 'escalated': return 'bg-red-100 text-red-800 border-red-200';
@@ -69,7 +67,7 @@ export default function AccountCenter() {
                 <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
                     <div className="flex items-center justify-between">
                         <div className="flex items-center gap-4">
-                            <Link href="/" className="text-gray-600 hover:text-gray-900">
+                            <Link href="/" className="text-gray-600 hover:text-gray-900" aria-label="Back to home">
                                 <ArrowLeft size={24} />
                             </Link>
                             <div>
@@ -104,21 +102,26 @@ export default function AccountCenter() {
                                 />
                             </div>
                             <select
+                                aria-label="Filter by status"
                                 value={statusFilter}
                                 onChange={(e) => setStatusFilter(e.target.value)}
                                 className="w-full px-4 py-2 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-noble-dark"
                             >
                                 <option value="all">All Status</option>
                                 <option value="pending">Pending</option>
+                                <option value="under-review">Under Review</option>
                                 <option value="in-progress">In Progress</option>
                                 <option value="resolved">Resolved</option>
                                 <option value="escalated">Escalated</option>
+                                <option value="closed">Closed</option>
                             </select>
                         </div>
 
                         {/* Complaints */}
                         <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
-                            {loading ? (
+                            {loadError ? (
+                                <p role="alert" className="text-center py-8 px-4 text-red-600">{loadError}</p>
+                            ) : loading ? (
                                 <p className="text-center py-8 text-gray-500">Loading...</p>
                             ) : filteredComplaints.length === 0 ? (
                                 <div className="text-center py-12">

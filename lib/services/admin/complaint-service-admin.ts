@@ -1,180 +1,288 @@
-import { adminDb } from '@/lib/firebase-admin';
-import { Complaint, ComplaintStatus } from '@/types/backend';
-import { Timestamp } from 'firebase-admin/firestore';
+import { randomInt, randomUUID } from 'crypto';
+import { FieldValue, Timestamp, Transaction } from 'firebase-admin/firestore';
+import { adminBucket, adminDb } from '@/lib/firebase-admin';
+import { HttpError, AuthUser } from '@/lib/server/auth';
+import { classifyComplaint } from '@/lib/engines/classification-engine';
+import {
+    Actor, NewComplaintInput, STATUS_TIMESTAMP_FIELD, MAX_TICKETS_PER_COMPLAINT, MAX_PHOTO_BYTES, PHOTO_CONTENT_TYPES,
+    checkPriorityChange, checkStatusChange, deletionMode, evidencePathFromURL, isStaffFor,
+} from '@/lib/complaint-policy';
+import { Complaint, ComplaintPriority, ComplaintStatus } from '@/types/backend';
 
-const COMPLAINTS_COLLECTION = 'complaints';
+const COMPLAINTS = 'complaints';
+const AUDIT_LOGS = 'auditLogs';
+const HOUR_MS = 60 * 60 * 1000;
 
-/**
- * Get complaint by ID (Admin Bypass)
- */
-export async function getComplaintByIdAdmin(id: string): Promise<Complaint | null> {
-    try {
-        if (!id) throw new Error('Complaint ID is required');
+// Server-side complaint records carry Admin SDK Timestamps
+export type StoredComplaint = Complaint;
 
-        const docRef = adminDb.collection(COMPLAINTS_COLLECTION).doc(id);
-        const docSnap = await docRef.get();
+const DOC_ID = /^[A-Za-z0-9_-]{1,128}$/;
+export const TRACKING_ID = /^JAN-\d{6}$/;
 
-        if (docSnap.exists) {
-            const data = docSnap.data();
-            return {
-                id: docSnap.id,
-                ...data, // Firestore admin returns native types, might need date conversion if using client types strictly, but for JSON response it's fine
-                // ensuring Timestamps are handled if needed, for now passing through
-            } as any as Complaint;
+function complaintRef(id: string) {
+    if (!DOC_ID.test(id)) throw new HttpError(400, 'Invalid complaint ID');
+    return adminDb().collection(COMPLAINTS).doc(id);
+}
+
+function writeAudit(tx: Transaction, actor: AuthUser, complaintId: string, action: string, extra: Record<string, unknown> = {}) {
+    tx.create(adminDb().collection(AUDIT_LOGS).doc(), {
+        complaintId,
+        action,
+        performedBy: actor.uid,
+        performedByName: actor.displayName,
+        performedByRole: actor.role,
+        timestamp: Timestamp.now(),
+        ...extra,
+    });
+}
+
+/** Convert Timestamps to ISO strings so API responses are plain JSON. */
+export function serialize<T>(value: T): T {
+    if (value === null || typeof value !== 'object') return value;
+    if (typeof (value as { toDate?: unknown }).toDate === 'function') {
+        return (value as unknown as Timestamp).toDate().toISOString() as T;
+    }
+    if (Array.isArray(value)) return value.map(serialize) as T;
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, serialize(v)])) as T;
+}
+
+export async function getComplaintByIdAdmin(id: string): Promise<StoredComplaint | null> {
+    const snap = await complaintRef(id).get();
+    return snap.exists ? ({ id: snap.id, ...snap.data() } as StoredComplaint) : null;
+}
+
+export async function getComplaintByTrackingIdAdmin(trackingId: string): Promise<StoredComplaint | null> {
+    if (!TRACKING_ID.test(trackingId)) return null;
+    const snap = await adminDb().collection(COMPLAINTS).where('trackingId', '==', trackingId).limit(1).get();
+    return snap.empty ? null : ({ id: snap.docs[0].id, ...snap.docs[0].data() } as StoredComplaint);
+}
+
+/** Complaints visible to the actor: own (citizen), department (official), all (admin). */
+export async function listComplaintsFor(actor: Actor): Promise<StoredComplaint[]> {
+    const col = adminDb().collection(COMPLAINTS);
+    let query;
+    if (actor.role === 'admin') query = col.orderBy('createdAt', 'desc');
+    else if (actor.role === 'official') {
+        if (!actor.department) throw new HttpError(403, 'Your official account has no department assigned');
+        query = col.where('assignedDepartment', '==', actor.department);
+    } else query = col.where('citizenId', '==', actor.uid).orderBy('createdAt', 'desc');
+
+    const snap = await query.get();
+    return snap.docs.map(d => ({ id: d.id, ...d.data() } as StoredComplaint));
+}
+
+/** Check that each evidence URL is an image the caller uploaded to their own folder. */
+async function verifyEvidence(urls: string[], uid: string): Promise<void> {
+    const bucket = process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET ?? '';
+    for (const url of urls) {
+        const path = evidencePathFromURL(url, { uid, bucket, emulatorHost: process.env.FIREBASE_STORAGE_EMULATOR_HOST });
+        if (!path) throw new HttpError(400, 'Photo evidence must be uploaded through the complaint form');
+        const [metadata] = await adminBucket().file(path).getMetadata().catch(() => {
+            throw new HttpError(400, 'Uploaded photo was not found; please upload it again');
+        });
+        if (!PHOTO_CONTENT_TYPES.includes(metadata.contentType ?? '') || Number(metadata.size) > MAX_PHOTO_BYTES) {
+            throw new HttpError(400, 'Photos must be JPG, PNG or WebP images up to 5MB');
         }
-
-        return null;
-    } catch (error) {
-        console.error('Error getting complaint (Admin):', error);
-        throw error;
     }
 }
 
 /**
- * Update complaint status (Admin Bypass)
+ * Create a complaint. Classification, SLA deadline and a unique tracking ID
+ * are assigned server-side; the tracking ID is reserved in trackingIds/{id}
+ * inside the same transaction so two complaints can never share one.
  */
-export async function updateComplaintStatusAdmin(
-    complaintId: string,
-    newStatus: ComplaintStatus,
-    user: any // simplified user obj
-): Promise<void> {
-    try {
-        const docRef = adminDb.collection(COMPLAINTS_COLLECTION).doc(complaintId);
+export async function createComplaintAdmin(input: NewComplaintInput, user: AuthUser): Promise<StoredComplaint> {
+    await verifyEvidence(input.photoURLs, user.uid);
 
-        // Verify existence first
-        const docSnap = await docRef.get();
-        if (!docSnap.exists) {
-            throw new Error(`Complaint not found: ${complaintId}`);
-        }
+    const db = adminDb();
+    const { department, slaHours, priority } = classifyComplaint(input.description, input.category);
+    const now = Timestamp.now();
+    const ref = db.collection(COMPLAINTS).doc();
+    const data = {
+        title: input.title,
+        description: input.description,
+        category: input.category,
+        department,
+        assignedDepartment: department,
+        status: 'pending' as ComplaintStatus,
+        priority,
+        location: input.location,
+        photoURLs: input.photoURLs,
+        citizenId: user.uid,
+        citizenName: user.displayName,
+        citizenEmail: user.email,
+        // remainingHours/status are a creation-time snapshot; live values come from sla-service
+        sla: { assignedHours: slaHours, deadline: Timestamp.fromMillis(now.toMillis() + slaHours * HOUR_MS), remainingHours: slaHours, status: 'on-track' },
+        createdAt: now,
+        updatedAt: now,
+        lastStatusChange: now,
+    };
 
-        const updateData: any = {
-            status: newStatus,
-            updatedAt: Timestamp.now(),
-        };
-
-        if (newStatus === 'resolved') {
-            updateData.resolvedAt = Timestamp.now();
-        } else if (newStatus === 'closed') {
-            updateData.closedAt = Timestamp.now();
-        } else if (newStatus === 'escalated') {
-            updateData.escalatedAt = Timestamp.now();
-        } else if (newStatus === 'in-progress') {
-            updateData.inProgressAt = Timestamp.now();
-        }
-
-        await docRef.update(updateData);
-
-        console.log(`✅ [ADMIN] Complaint ${complaintId} updated to ${newStatus}`);
-
-    } catch (error) {
-        console.error('Error updating complaint status (Admin):', error);
-        throw error;
+    for (let attempt = 0; attempt < 5; attempt++) {
+        const trackingId = `JAN-${randomInt(100000, 1000000)}`;
+        const reservation = db.collection('trackingIds').doc(trackingId);
+        const created = await db.runTransaction(async tx => {
+            const [reserved, legacy] = await Promise.all([
+                tx.get(reservation),
+                tx.get(db.collection(COMPLAINTS).where('trackingId', '==', trackingId).limit(1)),
+            ]);
+            if (reserved.exists || !legacy.empty) return false;
+            tx.create(reservation, { complaintId: ref.id, createdAt: now });
+            tx.create(ref, { ...data, trackingId });
+            writeAudit(tx, user, ref.id, 'created', { newValue: { status: 'pending', department, priority } });
+            return true;
+        });
+        if (created) return { id: ref.id, trackingId, ...data } as unknown as StoredComplaint;
     }
+    throw new HttpError(503, 'Could not allocate a tracking ID. Please try again.');
+}
+
+export interface ComplaintChanges {
+    status?: unknown;
+    priority?: unknown;
+    officialId?: unknown;
 }
 
 /**
- * Add citizen intervention ticket (Admin Bypass)
+ * Apply staff changes (status, priority, assignment) atomically with their
+ * audit records. Policy is checked against the record read in the transaction.
  */
-export async function addCitizenTicketAdmin(
-    complaintId: string,
-    reason: string,
-    message: string,
-    user: { uid: string; displayName: string; role: string }
-): Promise<void> {
-    try {
-        const docRef = adminDb.collection(COMPLAINTS_COLLECTION).doc(complaintId);
-        const docSnap = await docRef.get();
+export async function updateComplaintAdmin(id: string, actor: AuthUser, changes: ComplaintChanges) {
+    const ref = complaintRef(id);
+    const db = adminDb();
 
-        if (!docSnap.exists) {
-            throw new Error(`Complaint not found: ${complaintId}`);
+    return db.runTransaction(async tx => {
+        const snap = await tx.get(ref);
+        if (!snap.exists) throw new HttpError(404, 'Complaint not found');
+        const complaint = { id: snap.id, ...snap.data() } as StoredComplaint;
+        if (!isStaffFor(actor, complaint)) throw new HttpError(403, 'Not authorized to update this complaint');
+        const now = Timestamp.now();
+        const update: Record<string, unknown> = {};
+        const audits: Array<[string, Record<string, unknown>]> = [];
+        let nextStatus: ComplaintStatus | undefined;
+
+        if (changes.officialId !== undefined) {
+            if (actor.role !== 'admin') throw new HttpError(403, 'Only an authority can assign complaints');
+            if (typeof changes.officialId !== 'string' || !DOC_ID.test(changes.officialId)) throw new HttpError(400, 'Invalid official');
+            const official = await tx.get(db.collection('users').doc(changes.officialId));
+            if (official.data()?.role !== 'official') throw new HttpError(400, 'Assignee must be an official');
+            Object.assign(update, { assignedTo: changes.officialId, assignedAt: now });
+            audits.push(['assigned', { oldValue: complaint.assignedTo ?? null, newValue: changes.officialId }]);
+            if (complaint.status !== 'in-progress' && !checkStatusChange(actor, complaint, 'in-progress')) nextStatus = 'in-progress';
         }
 
-        const complaint = docSnap.data() as Complaint;
-
-        const ticket = {
-            reason,
-            message,
-            timestamp: Timestamp.now(),
-        };
-
-        // Auto-prioritize logic
-        const newPriority = complaint.priority === 'critical' ? 'critical' : 'high';
-
-        const updateData: any = {
-            priority: newPriority,
-            citizenTickets: [...(complaint.citizenTickets || []), ticket],
-            updatedAt: Timestamp.now(),
-        };
-
-        if (!complaint.escalatedAt) {
-            updateData.escalatedAt = Timestamp.now();
+        if (changes.status !== undefined && changes.status !== complaint.status) {
+            const error = checkStatusChange(actor, complaint, changes.status);
+            if (error) throw new HttpError(error.startsWith('Only') ? 403 : 400, error);
+            nextStatus = changes.status as ComplaintStatus;
         }
 
-        await docRef.update(updateData);
+        if (nextStatus) {
+            update.status = nextStatus;
+            update.lastStatusChange = now;
+            const field = STATUS_TIMESTAMP_FIELD[nextStatus];
+            if (field) update[field] = now;
+            audits.push(['status_changed', { oldValue: complaint.status, newValue: nextStatus }]);
+        }
 
-        console.log(`✅ [ADMIN] Ticket raised for ${complaintId}. Priority: ${newPriority}`);
-        console.log(`📧 [MOCK EMAIL] To Admin/Officials: Citizen Ticket on #${complaint.trackingId}`);
+        if (changes.priority !== undefined && changes.priority !== complaint.priority) {
+            const error = checkPriorityChange(actor, complaint, changes.priority);
+            if (error) throw new HttpError(error.startsWith('Only') ? 403 : 400, error);
+            update.priority = changes.priority as ComplaintPriority;
+            audits.push(['priority_changed', { oldValue: complaint.priority, newValue: changes.priority }]);
+        }
 
-    } catch (error) {
-        console.error('Error adding citizen ticket (Admin):', error);
-        throw error;
-    }
+        if (!audits.length) return { complaint, changed: false };
+
+        update.updatedAt = now;
+        tx.update(ref, update);
+        for (const [action, extra] of audits) writeAudit(tx, actor, id, action, extra);
+        return { complaint, changed: true, oldStatus: complaint.status, newStatus: nextStatus };
+    });
+}
+
+/** Citizen raises a ticket on their own complaint; priority is upgraded atomically. */
+export async function addCitizenTicketAdmin(id: string, actor: AuthUser, reason: string, message: string) {
+    const ref = complaintRef(id);
+    return adminDb().runTransaction(async tx => {
+        const snap = await tx.get(ref);
+        if (!snap.exists) throw new HttpError(404, 'Complaint not found');
+        const complaint = snap.data() as StoredComplaint;
+        if (complaint.citizenId !== actor.uid) throw new HttpError(403, 'You can only raise tickets on your own complaints');
+        if (complaint.status === 'resolved' || complaint.status === 'closed') throw new HttpError(409, 'This complaint is already closed');
+        if ((complaint.citizenTickets?.length ?? 0) >= MAX_TICKETS_PER_COMPLAINT) throw new HttpError(429, 'Ticket limit reached for this complaint');
+
+        const now = Timestamp.now();
+        const ticket = { id: randomUUID(), userId: actor.uid, reason, message, timestamp: now };
+        const priority: ComplaintPriority = complaint.priority === 'critical' ? 'critical' : 'high';
+        tx.update(ref, {
+            citizenTickets: FieldValue.arrayUnion(ticket),
+            priority,
+            updatedAt: now,
+            ...(complaint.escalatedAt ? {} : { escalatedAt: now }),
+        });
+        writeAudit(tx, actor, id, 'citizen_ticket_raised', { newValue: { reason, priority }, metadata: { ticketId: ticket.id } });
+        return { ticketId: ticket.id, priority };
+    });
+}
+
+export async function logCitizenCall(id: string, actor: AuthUser): Promise<StoredComplaint> {
+    const ref = complaintRef(id);
+    return adminDb().runTransaction(async tx => {
+        const snap = await tx.get(ref);
+        if (!snap.exists) throw new HttpError(404, 'Complaint not found');
+        const complaint = { id: snap.id, ...snap.data() } as StoredComplaint;
+        if (complaint.citizenId !== actor.uid) throw new HttpError(403, 'You can only act on your own complaints');
+        writeAudit(tx, actor, id, 'citizen_called_authority');
+        return complaint;
+    });
 }
 
 /**
- * Assign complaint to official (Admin Bypass)
+ * DELETE policy: admins permanently delete; citizens may only withdraw their
+ * own pending/under-review complaint (kept as closed for the audit trail).
  */
-export async function assignComplaintAdmin(
-    complaintId: string,
-    officialId: string,
-    user: { uid: string; displayName: string; role: string }
-): Promise<void> {
-    try {
-        const docRef = adminDb.collection(COMPLAINTS_COLLECTION).doc(complaintId);
-
-        // Verify existence
-        const docSnap = await docRef.get();
-        if (!docSnap.exists) {
-            throw new Error(`Complaint not found: ${complaintId}`);
+export async function removeComplaintAdmin(id: string, actor: AuthUser): Promise<'deleted' | 'withdrawn'> {
+    const ref = complaintRef(id);
+    const result = await adminDb().runTransaction(async tx => {
+        const snap = await tx.get(ref);
+        if (!snap.exists) throw new HttpError(404, 'Complaint not found');
+        const complaint = snap.data() as StoredComplaint;
+        const mode = deletionMode(actor, complaint);
+        if (!mode) {
+            throw new HttpError(403, complaint.citizenId === actor.uid
+                ? 'Complaints can only be withdrawn before work has started'
+                : 'Not authorized to delete this complaint');
         }
+        const now = Timestamp.now();
+        if (mode === 'withdraw') {
+            tx.update(ref, { status: 'closed', closedAt: now, withdrawnAt: now, closedReason: 'withdrawn-by-citizen', lastStatusChange: now, updatedAt: now });
+            writeAudit(tx, actor, id, 'withdrawn', { oldValue: complaint.status, newValue: 'closed' });
+            return { mode: 'withdrawn' as const, photos: [] };
+        }
+        tx.delete(ref);
+        writeAudit(tx, actor, id, 'deleted', { oldValue: { trackingId: complaint.trackingId, title: complaint.title, citizenId: complaint.citizenId, status: complaint.status } });
+        return { mode: 'deleted' as const, photos: complaint.photoURLs ?? [] };
+    });
 
-        const assignData = {
-            assignedTo: officialId,
-            status: 'in-progress',
-            assignedAt: Timestamp.now(),
-            inProgressAt: Timestamp.now(),
-            updatedAt: Timestamp.now(),
-        };
-
-        await docRef.update(assignData);
-
-        console.log(`✅ [ADMIN] Complaint ${complaintId} assigned to ${officialId}`);
-
-    } catch (error) {
-        console.error('Error assigning complaint (Admin):', error);
-        throw error;
+    // Best-effort cleanup of evidence belonging to a permanently deleted complaint
+    if (result.photos.length) {
+        const bucket = process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET ?? '';
+        await Promise.all(result.photos.map(url => {
+            const ownerUid = /\/o\/complaints%2F([^%]+)%2F/.exec(url)?.[1] ?? '';
+            const path = evidencePathFromURL(url, { uid: ownerUid, bucket, emulatorHost: process.env.FIREBASE_STORAGE_EMULATOR_HOST });
+            return path ? adminBucket().file(path).delete().catch(err => console.warn('Evidence cleanup failed:', err.message)) : null;
+        }));
     }
+    return result.mode;
 }
 
-/**
- * Delete complaint (Admin Bypass)
- */
-export async function deleteComplaintAdmin(id: string): Promise<void> {
-    try {
-        if (!id) throw new Error('Complaint ID is required');
+export async function getAuditLogsAdmin(complaintId: string) {
+    const snap = await adminDb().collection(AUDIT_LOGS).where('complaintId', '==', complaintId).orderBy('timestamp', 'desc').get();
+    return snap.docs.map(d => ({ id: d.id, ...d.data() }));
+}
 
-        const docRef = adminDb.collection(COMPLAINTS_COLLECTION).doc(id);
-        const docSnap = await docRef.get();
-
-        if (!docSnap.exists) {
-            throw new Error(`Complaint not found: ${id}`);
-        }
-
-        await docRef.delete();
-        console.log(`🗑️ [ADMIN] Complaint ${id} deleted`);
-
-    } catch (error) {
-        console.error('Error deleting complaint (Admin):', error);
-        throw error;
-    }
+export async function getEscalationsAdmin(complaintId: string) {
+    const snap = await adminDb().collection('escalations').where('complaintId', '==', complaintId).orderBy('escalatedAt', 'desc').get();
+    return snap.docs.map(d => ({ id: d.id, ...d.data() }));
 }

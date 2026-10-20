@@ -1,69 +1,41 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { addCitizenTicketAdmin } from '@/lib/services/admin/complaint-service-admin';
-import { logAudit } from '@/lib/services/audit-service';
+import { addCitizenTicketAdmin, logCitizenCall } from '@/lib/services/admin/complaint-service-admin';
+import { getAuthorityContact } from '@/lib/services/intervention-service';
+import { validateTicket } from '@/lib/complaint-policy';
+import { errorResponse, HttpError, readJson, requireUser } from '@/lib/server/auth';
 
 /**
  * POST /api/complaints/[id]/intervene
- * Handle citizen intervention actions: 'call' or 'raise-ticket'
+ * Citizen intervention on their own complaint: 'call' or 'raise-ticket'
  */
 export async function POST(
     request: NextRequest,
     props: { params: Promise<{ id: string }> }
 ) {
     try {
-        const params = await props.params;
-        const { id } = params;
-        const body = await request.json();
-        const { action, reason, message, user } = body;
+        const user = await requireUser(request);
+        const { id } = await props.params;
+        const body = await readJson(request);
 
-        console.log(`📡 [API] Intervene: ${action} on ${id}`);
-
-        if (!user || !user.uid) {
-            return NextResponse.json(
-                { success: false, error: 'User information required' },
-                { status: 401 }
-            );
+        if (body.action === 'call') {
+            const complaint = await logCitizenCall(id, user);
+            return NextResponse.json({ success: true, contact: getAuthorityContact(complaint.category) });
         }
 
-        if (action === 'call') {
-            // Log the call action
-            await logAudit({
-                complaintId: id,
-                action: 'citizen_called_authority',
-                performedBy: user.uid,
-                performedByName: user.displayName || 'Citizen',
-                performedByRole: 'citizen',
-                metadata: { message: 'Citizen initiated call to authority' }
-            });
-            return NextResponse.json({ success: true, message: 'Call logged' });
-        }
+        if (body.action === 'raise-ticket') {
+            const ticket = validateTicket(body);
+            if (!ticket.ok) throw new HttpError(400, ticket.error);
 
-        if (action === 'raise-ticket') {
-            if (!reason) {
-                return NextResponse.json(
-                    { success: false, error: 'Reason is required for raising a ticket' },
-                    { status: 400 }
-                );
-            }
-
-            await addCitizenTicketAdmin(id, reason, message || '', user);
-
+            const result = await addCitizenTicketAdmin(id, user, ticket.value.reason, ticket.value.message);
             return NextResponse.json({
                 success: true,
-                message: 'Ticket raised and priority upgraded'
+                ticketId: result.ticketId,
+                message: 'Ticket raised and priority upgraded',
             });
         }
 
-        return NextResponse.json(
-            { success: false, error: 'Invalid action' },
-            { status: 400 }
-        );
-
-    } catch (error: any) {
-        console.error('Intervention API Error:', error);
-        return NextResponse.json(
-            { success: false, error: error.message || 'Failed to process intervention' },
-            { status: 500 }
-        );
+        throw new HttpError(400, 'Invalid action');
+    } catch (error) {
+        return errorResponse(error, 'POST /api/complaints/[id]/intervene');
     }
 }

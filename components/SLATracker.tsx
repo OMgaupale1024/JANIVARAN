@@ -1,14 +1,17 @@
 'use client';
 
 import React from 'react';
-import { CheckCircle2, Clock, AlertCircle, Package, Wrench, ThumbsUp } from 'lucide-react';
+import { CheckCircle2, Clock, Package, Wrench, ThumbsUp } from 'lucide-react';
 import { Complaint } from '@/types/backend';
+import { calculateSLA, toMillis } from '@/lib/services/sla-service';
 
 interface SLATrackerProps {
     complaint: Complaint;
 }
 
 export default function SLATracker({ complaint }: SLATrackerProps) {
+    const sla = calculateSLA(complaint);
+    const isClosed = complaint.status === 'closed';
     const stages = [
         {
             id: 'filed',
@@ -22,18 +25,18 @@ export default function SLATracker({ complaint }: SLATrackerProps) {
             label: 'Under Review',
             icon: Clock,
             completed: complaint.status !== 'pending',
-            timestamp: complaint.status !== 'pending' ? complaint.updatedAt : null,
+            timestamp: complaint.underReviewAt ?? null,
         },
         {
             id: 'in-progress',
             label: 'In Progress',
             icon: Wrench,
-            completed: complaint.status === 'in-progress' || complaint.status === 'resolved' || complaint.status === 'closed',
-            timestamp: complaint.status === 'in-progress' || complaint.status === 'resolved' ? complaint.updatedAt : null,
+            completed: !!complaint.inProgressAt || complaint.status === 'in-progress' || complaint.status === 'resolved',
+            timestamp: complaint.inProgressAt ?? null,
         },
         {
             id: 'resolved',
-            label: 'Resolved',
+            label: isClosed ? (complaint.withdrawnAt ? 'Withdrawn' : 'Closed') : 'Resolved',
             icon: ThumbsUp,
             completed: complaint.status === 'resolved' || complaint.status === 'closed',
             timestamp: complaint.resolvedAt || complaint.closedAt || null,
@@ -41,7 +44,7 @@ export default function SLATracker({ complaint }: SLATrackerProps) {
     ];
 
     const getSLAStatusColor = () => {
-        switch (complaint.sla.status) {
+        switch (sla.status) {
             case 'on-track':
                 return 'text-green-600 bg-green-50 border-green-200';
             case 'at-risk':
@@ -58,10 +61,10 @@ export default function SLATracker({ complaint }: SLATrackerProps) {
         return (completedStages / stages.length) * 100;
     };
 
-    const formatTimestamp = (timestamp: any) => {
-        if (!timestamp) return null;
-        const date = timestamp.toDate ? timestamp.toDate() : new Date(timestamp);
-        return date.toLocaleString('en-IN', {
+    const formatTimestamp = (timestamp: unknown) => {
+        const ms = toMillis(timestamp);
+        if (ms === null) return null;
+        return new Date(ms).toLocaleString('en-IN', {
             day: 'numeric',
             month: 'short',
             year: 'numeric',
@@ -70,26 +73,20 @@ export default function SLATracker({ complaint }: SLATrackerProps) {
         });
     };
 
-    const getEstimatedResolution = () => {
-        if (complaint.sla.deadline) {
-            const deadline = complaint.sla.deadline.toDate();
-            return deadline.toLocaleString('en-IN', {
-                day: 'numeric',
-                month: 'short',
-                year: 'numeric',
-                hour: '2-digit',
-                minute: '2-digit',
-            });
-        }
-        return 'Not available';
-    };
+    const getEstimatedResolution = () => sla.deadline.toLocaleString('en-IN', {
+        day: 'numeric',
+        month: 'short',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+    });
 
     return (
         <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6">
             <div className="flex items-center justify-between mb-6">
                 <h3 className="text-xl font-bold text-gray-900">Complaint Progress</h3>
                 <div className={`px-4 py-2 rounded-full text-sm font-semibold border ${getSLAStatusColor()}`}>
-                    SLA: {complaint.sla.status.replace('-', ' ').toUpperCase()}
+                    SLA: {sla.closed ? 'CLOSED' : sla.status.replace('-', ' ').toUpperCase()}
                 </div>
             </div>
 
@@ -169,11 +166,13 @@ export default function SLATracker({ complaint }: SLATrackerProps) {
                 <div className="grid grid-cols-2 gap-4">
                     <div>
                         <p className="text-sm text-gray-500 mb-1">Time Remaining</p>
-                        <p className={`font-semibold ${complaint.sla.remainingHours > 0 ? 'text-green-600' : 'text-red-600'
+                        <p className={`font-semibold ${sla.closed || sla.remainingHours > 0 ? 'text-green-600' : 'text-red-600'
                             }`}>
-                            {complaint.sla.remainingHours > 0
-                                ? `${Math.round(complaint.sla.remainingHours)} hours`
-                                : `Overdue by ${Math.abs(Math.round(complaint.sla.remainingHours))} hours`}
+                            {sla.closed
+                                ? 'Closed'
+                                : sla.remainingHours > 0
+                                    ? `${Math.round(sla.remainingHours)} hours`
+                                    : `Overdue by ${Math.abs(Math.round(sla.remainingHours))} hours`}
                         </p>
                     </div>
                     <div>

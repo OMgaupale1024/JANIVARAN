@@ -55,11 +55,10 @@ export default function CitizenSignup() {
                 email: formData.email,
                 password: formData.password,
                 displayName: formData.displayName,
-                role: 'citizen', // Default role for citizen signup
             });
             window.location.href = '/citizen/dashboard';
-        } catch (err: any) {
-            setError(err.message || 'Failed to create account. Please try again.');
+        } catch (err) {
+            setError(err instanceof Error && err.message ? err.message : 'Failed to create account. Please try again.');
             setLoading(false);
         }
     };
@@ -71,8 +70,8 @@ export default function CitizenSignup() {
         try {
             await signInWithGoogle();
             window.location.href = '/citizen/dashboard';
-        } catch (err: any) {
-            setError(err.message || 'Failed to sign up with Google.');
+        } catch (err) {
+            setError(err instanceof Error && err.message ? err.message : 'Failed to sign up with Google.');
             setLoading(false);
         }
     };

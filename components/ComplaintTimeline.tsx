@@ -1,14 +1,31 @@
 'use client';
 
 import React from 'react';
-import { Complaint } from '@/types/backend';
-import { CheckCircle, Clock, AlertTriangle, ArrowRight, Circle } from 'lucide-react';
+import { ComplaintStatus } from '@/types/backend';
+import { CheckCircle, Clock, AlertTriangle, Circle, Search } from 'lucide-react';
+import { calculateSLA, toMillis } from '@/lib/services/sla-service';
+
+// Works with Firestore records and the JSON public tracking view
+export interface TimelineComplaint {
+    status: ComplaintStatus;
+    category?: string;
+    sla?: { assignedHours?: number; deadline?: unknown } | null;
+    createdAt?: unknown;
+    updatedAt?: unknown;
+    underReviewAt?: unknown;
+    assignedAt?: unknown;
+    inProgressAt?: unknown;
+    escalatedAt?: unknown;
+    resolvedAt?: unknown;
+    closedAt?: unknown;
+}
 
 interface ComplaintTimelineProps {
-    complaint: Complaint;
+    complaint: TimelineComplaint;
 }
 
 export default function ComplaintTimeline({ complaint }: ComplaintTimelineProps) {
+    const isClosed = complaint.status === 'closed' && !complaint.resolvedAt;
     const steps = [
         {
             id: 'submitted',
@@ -16,6 +33,13 @@ export default function ComplaintTimeline({ complaint }: ComplaintTimelineProps)
             date: complaint.createdAt,
             status: 'completed',
             icon: CheckCircle,
+        },
+        {
+            id: 'under-review',
+            label: 'Under Review',
+            date: complaint.underReviewAt,
+            status: complaint.underReviewAt ? 'completed' : (complaint.status === 'under-review' ? 'active' : 'pending'),
+            icon: Search,
         },
         {
             id: 'assigned',
@@ -33,16 +57,16 @@ export default function ComplaintTimeline({ complaint }: ComplaintTimelineProps)
         },
         {
             id: 'resolved',
-            label: 'Resolved',
-            date: complaint.resolvedAt,
-            status: complaint.resolvedAt ? 'completed' : (complaint.status === 'resolved' ? 'active' : 'pending'),
+            label: isClosed ? 'Closed' : 'Resolved',
+            date: isClosed ? complaint.closedAt : complaint.resolvedAt,
+            status: complaint.resolvedAt || isClosed ? 'completed' : (complaint.status === 'resolved' ? 'active' : 'pending'),
             icon: CheckCircle,
         }
     ];
 
-    // Insert escalation if present
+    // Insert escalation (before the final step) if present
     if (complaint.escalatedAt || complaint.status === 'escalated') {
-        steps.splice(3, 0, {
+        steps.splice(steps.length - 1, 0, {
             id: 'escalated',
             label: 'Escalated',
             date: complaint.escalatedAt,
@@ -51,11 +75,13 @@ export default function ComplaintTimeline({ complaint }: ComplaintTimelineProps)
         });
     }
 
-    const formatDate = (timestamp: any) => {
-        if (!timestamp) return '';
-        // Handle Firestore Timestamp or JS Date
-        const date = timestamp.toDate ? timestamp.toDate() : new Date(timestamp);
-        return date.toLocaleString('en-US', {
+    const sla = calculateSLA(complaint);
+    const slaColor = sla.status === 'breached' ? 'red' : sla.status === 'at-risk' && !sla.closed ? 'yellow' : 'green';
+
+    const formatDate = (timestamp: unknown) => {
+        const ms = toMillis(timestamp);
+        if (ms === null) return '';
+        return new Date(ms).toLocaleString('en-US', {
             month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
         });
     };
@@ -71,7 +97,7 @@ export default function ComplaintTimeline({ complaint }: ComplaintTimelineProps)
                 <div className="hidden md:block absolute top-4 left-0 right-0 h-0.5 bg-gray-200"></div>
 
                 <div className="flex flex-col md:flex-row justify-between relative z-10 gap-8 md:gap-0">
-                    {steps.map((step, index) => {
+                    {steps.map((step) => {
                         const isCompleted = step.status === 'completed';
                         const isActive = step.status === 'active';
                         const isPending = step.status === 'pending';
@@ -103,19 +129,19 @@ export default function ComplaintTimeline({ complaint }: ComplaintTimelineProps)
             {/* SLA Status Bar */}
             <div className="mt-8 bg-gray-50 rounded-xl p-4 md:p-6 border border-gray-100 flex flex-col md:flex-row justify-between items-center gap-4">
                 <div className="flex items-center gap-3">
-                    <div className={`p-2 rounded-lg ${complaint.sla?.status === 'breached' ? 'bg-red-100 text-red-600' :
-                            complaint.sla?.status === 'at-risk' ? 'bg-yellow-100 text-yellow-600' :
+                    <div className={`p-2 rounded-lg ${slaColor === 'red' ? 'bg-red-100 text-red-600' :
+                            slaColor === 'yellow' ? 'bg-yellow-100 text-yellow-600' :
                                 'bg-green-100 text-green-600'
                         }`}>
                         <Clock size={20} />
                     </div>
                     <div>
                         <div className="text-xs text-gray-500 font-bold uppercase tracking-wider">SLA Status</div>
-                        <div className={`text-sm font-bold capitalize ${complaint.sla?.status === 'breached' ? 'text-red-700' :
-                                complaint.sla?.status === 'at-risk' ? 'text-yellow-700' :
+                        <div className={`text-sm font-bold capitalize ${slaColor === 'red' ? 'text-red-700' :
+                                slaColor === 'yellow' ? 'text-yellow-700' :
                                     'text-green-700'
                             }`}>
-                            {complaint.sla?.status?.replace('-', ' ') || 'On Track'}
+                            {sla.closed ? (sla.status === 'breached' ? 'Closed after deadline' : 'Closed within SLA') : sla.status.replace('-', ' ')}
                         </div>
                     </div>
                 </div>
@@ -123,15 +149,15 @@ export default function ComplaintTimeline({ complaint }: ComplaintTimelineProps)
                 <div className="w-full md:w-1/2">
                     <div className="flex justify-between text-xs text-gray-500 mb-2">
                         <span>Progress</span>
-                        <span>{complaint.sla?.remainingHours > 0 ? `${Math.round(complaint.sla.remainingHours)}h remaining` : 'Breached'}</span>
+                        <span>{sla.closed ? 'Closed' : sla.remainingHours > 0 ? `${Math.round(sla.remainingHours)}h remaining` : 'Breached'}</span>
                     </div>
                     <div className="w-full bg-gray-200 h-2 rounded-full overflow-hidden">
                         <div
-                            className={`h-full rounded-full transition-all duration-500 ${complaint.sla?.status === 'breached' ? 'bg-red-500' :
-                                    complaint.sla?.status === 'at-risk' ? 'bg-yellow-500' :
+                            className={`h-full rounded-full transition-all duration-500 ${slaColor === 'red' ? 'bg-red-500' :
+                                    slaColor === 'yellow' ? 'bg-yellow-500' :
                                         'bg-green-500'
                                 }`}
-                            style={{ width: `${Math.max(0, Math.min(100, (1 - (complaint.sla?.remainingHours / complaint.sla?.assignedHours)) * 100))}%` }}
+                            style={{ width: `${sla.progress}%` }}
                         ></div>
                     </div>
                 </div>

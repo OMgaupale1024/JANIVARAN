@@ -12,6 +12,12 @@ interface CityData {
     color: string;
 }
 
+// Deterministic per-dot variation (stable across renders and server/client hydration)
+const pseudoRandom = (n: number) => {
+    const v = Math.sin(n) * 10000;
+    return v - Math.floor(v);
+};
+
 export default function DottedIndiaMap() {
     const [activeCity, setActiveCity] = useState<CityData | null>(null);
     const [randomPopup, setRandomPopup] = useState<CityData | null>(null);
@@ -63,9 +69,9 @@ export default function DottedIndiaMap() {
                     dotGrid.push({
                         x,
                         y,
-                        size: Math.random() * 3 + 2,
+                        size: pseudoRandom(x * 31 + y) * 3 + 2,
                         opacity: alpha,
-                        delay: Math.random() * 2,
+                        delay: pseudoRandom(x * 17 + y * 13) * 2,
                     });
                 }
             }

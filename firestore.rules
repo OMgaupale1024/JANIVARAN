@@ -1,12 +1,79 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    
-    // TEMPORARY: Allow all access to unblock development
-    // The previous rules were too restrictive for the server-side API calls
-    
+
+    // Complaint writes, tracking-ID reservations, audit logs and role changes
+    // happen only on the server (Admin SDK bypasses these rules after its own
+    // token + role checks). Browsers get scoped read access for live listeners.
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function profile() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function hasProfile() {
+      return signedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+
+    function isAdmin() {
+      return hasProfile() && profile().role == 'admin';
+    }
+
+    function isOfficialFor(department) {
+      return hasProfile()
+        && profile().role == 'official'
+        && profile().get('department', null) is string
+        && profile().department == department;
+    }
+
+    match /users/{uid} {
+      allow read: if signedIn() && (request.auth.uid == uid || isAdmin());
+
+      // Self-signup always creates a citizen; roles/departments are assigned by an admin
+      allow create: if signedIn()
+        && request.auth.uid == uid
+        && request.resource.data.keys().hasOnly(['uid', 'email', 'displayName', 'role', 'createdAt', 'lastLogin', 'photoURL'])
+        && request.resource.data.uid == uid
+        && request.resource.data.role == 'citizen'
+        && request.resource.data.email == request.auth.token.get('email', '')
+        && request.resource.data.displayName is string
+        && request.resource.data.displayName.size() <= 100;
+
+      // Users may only touch harmless profile fields (never role/department)
+      allow update: if signedIn()
+        && request.auth.uid == uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['displayName', 'lastLogin', 'photoURL'])
+        && request.resource.data.displayName is string
+        && request.resource.data.displayName.size() <= 100;
+
+      allow delete: if false;
+    }
+
+    match /complaints/{complaintId} {
+      allow read: if signedIn() && (
+        resource.data.citizenId == request.auth.uid
+        || isAdmin()
+        || isOfficialFor(resource.data.assignedDepartment)
+      );
+      allow write: if false;
+    }
+
+    match /auditLogs/{logId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    match /escalations/{escalationId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    // Everything else (including trackingIds) is server-only
     match /{document=**} {
-      allow read, write: if true;
+      allow read, write: if false;
     }
   }
 }

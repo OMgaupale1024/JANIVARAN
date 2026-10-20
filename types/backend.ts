@@ -15,7 +15,7 @@ export interface User {
 }
 
 // Complaint Types
-export type ComplaintStatus = 'pending' | 'in-progress' | 'resolved' | 'closed' | 'escalated';
+export type ComplaintStatus = 'pending' | 'under-review' | 'in-progress' | 'resolved' | 'closed' | 'escalated';
 export type ComplaintPriority = 'low' | 'medium' | 'high' | 'critical';
 export type SLAStatus = 'on-track' | 'at-risk' | 'breached';
 
@@ -56,9 +56,14 @@ export interface Complaint {
     resolvedAt?: Timestamp;
     closedAt?: Timestamp;
     lastStatusChange?: Timestamp;
+    underReviewAt?: Timestamp;
     assignedAt?: Timestamp;
     inProgressAt?: Timestamp;
     escalatedAt?: Timestamp;
+    withdrawnAt?: Timestamp;
+    closedReason?: string;
+    // Demo data that the dev-only simulation endpoint may modify
+    testData?: boolean;
 
     // Intervention actions
     interventionActions?: Array<{
@@ -72,6 +77,8 @@ export interface Complaint {
 
     // Citizen intervention tickets
     citizenTickets?: Array<{
+        id?: string;
+        userId?: string;
         reason: string;
         message?: string;
         timestamp: Timestamp;
@@ -103,10 +110,10 @@ export interface AuditLog {
     performedBy: string;
     performedByName: string;
     performedByRole: UserRole;
-    oldValue?: any;
-    newValue?: any;
+    oldValue?: unknown;
+    newValue?: unknown;
     timestamp: Timestamp;
-    metadata?: Record<string, any>;
+    metadata?: Record<string, unknown>;
 }
 
 // Department Types
@@ -150,10 +157,9 @@ export interface ComplaintFormData {
     photoURLs?: string[];
 }
 
+// Public signup always creates a citizen; roles/departments are assigned by an admin.
 export interface SignUpData {
     email: string;
     password: string;
     displayName: string;
-    role: UserRole;
-    department?: string;
 }

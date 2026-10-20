@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useSyncExternalStore } from 'react';
 import { ComposableMap, Geographies, Geography } from 'react-simple-maps';
 
 const INDIA_TOPO_JSON = "https://raw.githubusercontent.com/Anujarya300/india-maps/master/india-states.json";
@@ -24,11 +24,8 @@ const cities: CityMarker[] = [
 export default function GradientIndiaMap() {
     const [activeCity, setActiveCity] = useState<CityMarker | null>(null);
     const [randomPopup, setRandomPopup] = useState<CityMarker | null>(null);
-    const [mounted, setMounted] = useState(false);
-
-    useEffect(() => {
-        setMounted(true);
-    }, []);
+    // true only in the browser (avoids a hydration mismatch for the animated map)
+    const mounted = useSyncExternalStore(() => () => {}, () => true, () => false);
 
     useEffect(() => {
         if (!mounted) return;
