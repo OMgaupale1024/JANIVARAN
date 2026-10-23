@@ -1,29 +1,121 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { ref, uploadBytesResumable, getDownloadURL } from 'firebase/storage';
 import { MapPin, Send, ArrowLeft, CheckCircle, Upload, ArrowRight, Loader2, X } from 'lucide-react';
 import { useAuth } from '@/lib/auth-context';
 import { storage } from '@/lib/firebase-config';
-import { apiFetch } from '@/lib/api-client';
+import { apiFetch, ApiError } from '@/lib/api-client';
 import { MAX_PHOTOS, MAX_PHOTO_BYTES, PHOTO_CONTENT_TYPES } from '@/lib/complaint-policy';
 
 const EXTENSIONS: Record<string, string> = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' };
 const EMPTY_FORM = { title: '', category: '', description: '', location: '' };
+const PHOTO_TIMEOUT_MS = 120_000; // per photo; progress is shown meanwhile
+const DRAFT_KEY = 'jannivaran:complaint-draft';
+const SIGN_IN_URL = '/citizen?next=/file-complaint';
+
+type FormState = typeof EMPTY_FORM;
+type Draft = { formData: FormState; step: number; requestId: string | null };
+type FormError = { message: string; signIn?: boolean; savedAs?: string };
+
+// The draft survives a sign-in round trip or a reload (photos have to be re-attached)
+function readDraft(): Draft | null {
+    try {
+        return JSON.parse(sessionStorage.getItem(DRAFT_KEY) ?? 'null');
+    } catch {
+        return null;
+    }
+}
+function writeDraft(draft: Draft | null) {
+    try {
+        if (draft) sessionStorage.setItem(DRAFT_KEY, JSON.stringify(draft));
+        else sessionStorage.removeItem(DRAFT_KEY);
+    } catch {
+        // storage unavailable: the draft stays in memory only
+    }
+}
+
+// Upload one photo to the citizen's own folder (Storage rules enforce owner, type and size)
+function uploadPhoto(uid: string, file: File, onProgress: (percent: number) => void): Promise<string> {
+    const objectRef = ref(storage, `complaints/${uid}/${crypto.randomUUID()}/photo.${EXTENSIONS[file.type]}`);
+    const task = uploadBytesResumable(objectRef, file, { contentType: file.type });
+    const timer = setTimeout(() => task.cancel(), PHOTO_TIMEOUT_MS);
+    return new Promise<string>((resolve, reject) => {
+        task.on('state_changed',
+            snap => onProgress(Math.round((snap.bytesTransferred / snap.totalBytes) * 100)),
+            reject,
+            () => getDownloadURL(objectRef).then(resolve, reject));
+    }).finally(() => clearTimeout(timer));
+}
+
+function describeFailure(error: unknown, stage: 'upload' | 'save'): FormError {
+    if (stage === 'upload') {
+        const code = (error as { code?: string })?.code ?? '';
+        if (code === 'storage/unauthorized' || code === 'storage/unauthenticated') {
+            return { message: 'Photo upload was refused. Make sure you are signed in and each photo is a JPG, PNG or WebP image under 5MB.' };
+        }
+        if (code === 'storage/retry-limit-exceeded' || code === 'storage/canceled') {
+            return { message: "Couldn't reach photo storage. Check your connection and try again, or remove the photos and submit without them." };
+        }
+        return { message: 'Photo upload failed. Try again, or remove the photos and submit without them.' };
+    }
+    if (!(error instanceof ApiError)) return { message: 'Something went wrong. Your details are kept, so please try again.' };
+    switch (error.kind) {
+        case 'no-response':
+        case 'invalid-response':
+            return { message: "We couldn't confirm that your complaint was received. It may already be saved: press Submit again to check. This won't create a duplicate." };
+        case 'signed-out':
+            return { message: 'Your session has expired. Sign in again; your details are kept on this device.', signIn: true };
+        case 'not-sent':
+            return { message: error.message };
+    }
+    if (error.status === 409 && typeof error.body.trackingId === 'string') {
+        return { message: `This complaint was already submitted as ${error.body.trackingId}.`, savedAs: error.body.trackingId };
+    }
+    if (error.status >= 500) return { message: 'The service is temporarily unavailable. Your details are kept, so please try again in a moment.' };
+    return { message: error.message };
+}
 
 export default function FileComplaintPage() {
     const router = useRouter();
-    const { user } = useAuth();
+    const { user, firebaseUser, loading: authLoading, authError } = useAuth();
 
     const [step, setStep] = useState(1);
     const [formData, setFormData] = useState(EMPTY_FORM);
     const [files, setFiles] = useState<File[]>([]);
     const [fileError, setFileError] = useState('');
     const [trackingId, setTrackingId] = useState('');
-    const [loading, setLoading] = useState(false);
-    const [error, setError] = useState('');
+    const [progress, setProgress] = useState(''); // non-empty while a submission is running
+    const [error, setError] = useState<FormError | null>(null);
+    const [gpsStatus, setGpsStatus] = useState('');
+    const [restored, setRestored] = useState(false);
+
+    const submitting = useRef(false);
+    const requestId = useRef<string | null>(null); // one per complaint, kept across retries
+    const uploaded = useRef(new Map<File, string>()); // photos already uploaded: reused on retry
+
+    const busy = progress !== '';
+    const needsSignIn = !authLoading && !firebaseUser;
+    const profileProblem = !authLoading && firebaseUser && !user
+        ? authError ?? 'We could not load your account. Check your connection and refresh the page.'
+        : null;
+
+    useEffect(() => {
+        const draft = readDraft();
+        if (!draft) return;
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- restoring client-only storage after hydration
+        setFormData(draft.formData);
+        setStep(Math.min(draft.step, 3));
+        setRestored(true);
+        requestId.current = draft.requestId;
+    }, []);
+
+    const goToSignIn = () => {
+        writeDraft({ formData, step, requestId: requestId.current });
+        router.push(SIGN_IN_URL);
+    };
 
     const handleFiles = (e: React.ChangeEvent<HTMLInputElement>) => {
         const selected = Array.from(e.target.files ?? []);
@@ -41,31 +133,53 @@ export default function FileComplaintPage() {
         setFileError(rejected.join('. '));
     };
 
-    const handleSubmit = async (e: React.FormEvent) => {
-        e.preventDefault();
-
-        if (!user) {
-            setError('You must be logged in to file a complaint');
-            setTimeout(() => router.push('/citizen'), 2000);
+    const fillGpsLocation = () => {
+        if (!('geolocation' in navigator)) {
+            setGpsStatus('GPS is not available in this browser. Type the address or a landmark instead.');
             return;
         }
+        setGpsStatus('Getting your location…');
+        navigator.geolocation.getCurrentPosition(
+            ({ coords }) => {
+                const fix = `GPS ${coords.latitude.toFixed(5)}, ${coords.longitude.toFixed(5)} ±${Math.round(coords.accuracy)} m`;
+                setFormData(prev => {
+                    const typed = prev.location.replace(/\s*\(?GPS [^)]*\)?$/, '').trim();
+                    return { ...prev, location: (typed ? `${typed} (${fix})` : fix).slice(0, 300) };
+                });
+                setGpsStatus('Coordinates added. Only you and the officials handling this complaint can see them.');
+            },
+            err => setGpsStatus(err.code === err.PERMISSION_DENIED
+                ? 'Location permission was denied. Type the address or a landmark instead.'
+                : "Couldn't get your location. Type the address or a landmark instead."),
+            { enableHighAccuracy: true, timeout: 10_000, maximumAge: 60_000 },
+        );
+    };
 
-        setLoading(true);
-        setError('');
+    const handleSubmit = async () => {
+        if (submitting.current) return; // double click or a second tap while running
+        if (needsSignIn) return goToSignIn();
+        if (!firebaseUser || !user) return;
+        submitting.current = true;
+        setError(null);
+        requestId.current ??= crypto.randomUUID();
 
-        let stage = 'upload';
+        let stage: 'upload' | 'save' = 'upload';
         try {
-            // Upload evidence to the citizen's own folder (Storage rules enforce owner, type and size)
             const photoURLs: string[] = [];
-            for (const file of files) {
-                const objectRef = ref(storage, `complaints/${user.uid}/${crypto.randomUUID()}/photo.${EXTENSIONS[file.type]}`);
-                await uploadBytes(objectRef, file, { contentType: file.type });
-                photoURLs.push(await getDownloadURL(objectRef));
+            for (const [i, file] of files.entries()) {
+                const label = `Uploading photo ${i + 1} of ${files.length}`;
+                setProgress(`${label}…`);
+                const url = uploaded.current.get(file)
+                    ?? await uploadPhoto(firebaseUser.uid, file, percent => setProgress(`${label} (${percent}%)…`));
+                uploaded.current.set(file, url);
+                photoURLs.push(url);
             }
 
-            stage = 'submit';
-            const { data } = await apiFetch<{ data: { trackingId: string } }>('/api/complaints', {
+            stage = 'save';
+            setProgress('Saving your complaint…');
+            const result = await apiFetch<{ data?: { trackingId?: unknown } }>('/api/complaints', {
                 method: 'POST',
+                headers: { 'Idempotency-Key': requestId.current },
                 body: JSON.stringify({
                     title: formData.title,
                     description: formData.description,
@@ -74,17 +188,42 @@ export default function FileComplaintPage() {
                     photoURLs,
                 }),
             });
+            const saved = result.data?.trackingId;
+            if (typeof saved !== 'string' || !/^JAN-\d{6}$/.test(saved)) {
+                throw new ApiError('The server sent an unexpected response.', 'invalid-response');
+            }
 
-            setTrackingId(data.trackingId);
-            setStep(4); // Success step
+            // Confirmed by the server: the next complaint starts fresh
+            setTrackingId(saved);
+            setStep(4);
+            requestId.current = null;
+            uploaded.current.clear();
+            writeDraft(null);
         } catch (err) {
-            const message = err instanceof Error ? err.message : '';
-            setError(stage === 'upload'
-                ? `Photo upload failed. Please try again or remove the photos. ${message}`.trim()
-                : message || 'Failed to submit complaint. Please try again.');
+            setError(describeFailure(err, stage));
+            writeDraft({ formData, step: 3, requestId: requestId.current });
         } finally {
-            setLoading(false);
+            submitting.current = false;
+            setProgress('');
         }
+    };
+
+    const startNewComplaint = () => {
+        requestId.current = null;
+        handleSubmit();
+    };
+
+    const resetForm = () => {
+        setStep(1);
+        setFormData(EMPTY_FORM);
+        setFiles([]);
+        setFileError('');
+        setError(null);
+        setGpsStatus('');
+        setRestored(false);
+        requestId.current = null;
+        uploaded.current.clear();
+        writeDraft(null);
     };
 
     return (
@@ -99,6 +238,22 @@ export default function FileComplaintPage() {
             </header>
 
             <main className="max-w-3xl mx-auto px-6 py-12">
+                {step < 4 && authLoading && (
+                    <p role="status" className="mb-4 text-sm text-gray-500">Checking your sign-in…</p>
+                )}
+                {step < 4 && profileProblem && (
+                    <div role="alert" className="mb-4 p-4 bg-red-50 border border-red-200 rounded-xl text-sm text-red-700 flex items-center justify-between gap-4">
+                        <span>{profileProblem} Your answers are kept.</span>
+                        <button type="button" onClick={() => window.location.reload()} className="shrink-0 font-semibold underline">Try again</button>
+                    </div>
+                )}
+                {step < 4 && needsSignIn && (
+                    <div className="mb-4 p-4 bg-blue-50 border border-blue-200 rounded-xl text-sm text-blue-800 flex items-center justify-between gap-4">
+                        <span>You&apos;ll need to sign in to submit. Your answers are kept on this device.</span>
+                        <button type="button" onClick={goToSignIn} className="shrink-0 font-semibold underline">Sign in</button>
+                    </div>
+                )}
+
                 <div className="bg-white rounded-2xl shadow-xl border border-gray-100 overflow-hidden">
                     {/* Progress Bar */}
                     <div className="bg-gray-100 h-2 w-full">
@@ -119,6 +274,7 @@ export default function FileComplaintPage() {
                                     {['Sanitation & Waste', 'Roads & Potholes', 'Water Supply', 'Electricity', 'Public Transport', 'Other'].map((cat) => (
                                         <button
                                             key={cat}
+                                            type="button"
                                             onClick={() => { setFormData({ ...formData, category: cat }); setStep(2); }}
                                             className="p-6 text-left border rounded-xl hover:border-noble-dark hover:bg-noble-dark/5 transition-all group"
                                         >
@@ -135,11 +291,6 @@ export default function FileComplaintPage() {
                                     <h1 className="text-3xl font-serif mb-2">Details & Location</h1>
                                     <p className="text-gray-500">Provide specific details to help officials locate and fix the problem.</p>
                                 </div>
-                                {error && (
-                                    <div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-xl">
-                                        <p className="text-sm text-red-600">{error}</p>
-                                    </div>
-                                )}
                                 <div className="space-y-6">
                                     <div>
                                         <label htmlFor="complaint-title" className="block text-sm font-medium mb-2">Title (Optional)</label>
@@ -174,17 +325,24 @@ export default function FileComplaintPage() {
                                                 id="complaint-location"
                                                 type="text"
                                                 maxLength={300}
-                                                className="w-full border border-gray-300 rounded-xl p-4 pl-12 focus:ring-2 focus:ring-noble-dark focus:border-transparent outline-none"
+                                                aria-describedby="gps-status"
+                                                className="w-full border border-gray-300 rounded-xl p-4 pl-12 pr-24 focus:ring-2 focus:ring-noble-dark focus:border-transparent outline-none"
                                                 placeholder="Enter address or landmark"
                                                 value={formData.location}
                                                 onChange={(e) => setFormData({ ...formData, location: e.target.value })}
                                             />
-                                            <button className="absolute right-3 top-1/2 -translate-y-1/2 text-xs bg-gray-100 hover:bg-gray-200 px-3 py-1.5 rounded-lg text-gray-600">
+                                            <button
+                                                type="button"
+                                                onClick={fillGpsLocation}
+                                                className="absolute right-3 top-1/2 -translate-y-1/2 text-xs bg-gray-100 hover:bg-gray-200 px-3 py-1.5 rounded-lg text-gray-600"
+                                            >
                                                 Use GPS
                                             </button>
                                         </div>
+                                        <p id="gps-status" role="status" className="text-xs text-gray-500 mt-1 min-h-4">{gpsStatus}</p>
                                     </div>
                                     <button
+                                        type="button"
                                         onClick={() => setStep(3)}
                                         disabled={formData.description.trim().length < 10 || formData.location.trim().length < 3}
                                         className="w-full bg-noble-dark text-white py-4 rounded-xl font-bold text-lg disabled:opacity-50 disabled:cursor-not-allowed hover:bg-opacity-90 transition-all flex items-center justify-center gap-2"
@@ -200,11 +358,14 @@ export default function FileComplaintPage() {
                                 <div>
                                     <h1 className="text-3xl font-serif mb-2">Evidence & Submit</h1>
                                     <p className="text-gray-500">Upload photos (optional) and verify your report.</p>
+                                    {restored && files.length === 0 && (
+                                        <p className="text-sm text-gray-500 mt-2">Your draft was restored. Re-attach any photos you had selected.</p>
+                                    )}
                                 </div>
 
                                 <label
                                     htmlFor="photo-upload"
-                                    className={`block border-2 border-dashed border-gray-200 rounded-2xl p-12 text-center transition-colors group focus-within:ring-2 focus-within:ring-noble-dark ${files.length >= MAX_PHOTOS || loading ? 'opacity-50 cursor-not-allowed' : 'hover:bg-gray-50 cursor-pointer'}`}
+                                    className={`block border-2 border-dashed border-gray-200 rounded-2xl p-12 text-center transition-colors group focus-within:ring-2 focus-within:ring-noble-dark ${files.length >= MAX_PHOTOS || busy ? 'opacity-50 cursor-not-allowed' : 'hover:bg-gray-50 cursor-pointer'}`}
                                 >
                                     <input
                                         id="photo-upload"
@@ -213,7 +374,7 @@ export default function FileComplaintPage() {
                                         multiple
                                         className="sr-only"
                                         onChange={handleFiles}
-                                        disabled={files.length >= MAX_PHOTOS || loading}
+                                        disabled={files.length >= MAX_PHOTOS || busy}
                                         aria-describedby="photo-help"
                                     />
                                     <div className="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4 group-hover:scale-110 transition-transform">
@@ -235,7 +396,7 @@ export default function FileComplaintPage() {
                                                 <button
                                                     type="button"
                                                     onClick={() => setFiles(prev => prev.filter((_, j) => j !== i))}
-                                                    disabled={loading}
+                                                    disabled={busy}
                                                     className="p-1 text-gray-500 hover:text-red-600 rounded"
                                                     aria-label={`Remove ${file.name}`}
                                                 >
@@ -247,8 +408,17 @@ export default function FileComplaintPage() {
                                 )}
 
                                 {error && (
-                                    <div role="alert" className="p-4 bg-red-50 border border-red-200 rounded-xl">
-                                        <p className="text-sm text-red-600">{error}</p>
+                                    <div role="alert" className="p-4 bg-red-50 border border-red-200 rounded-xl text-sm text-red-600 space-y-2">
+                                        <p>{error.message}</p>
+                                        {error.signIn && (
+                                            <button type="button" onClick={goToSignIn} className="font-semibold underline">Sign in again</button>
+                                        )}
+                                        {error.savedAs && (
+                                            <p className="flex flex-wrap gap-4">
+                                                <Link href="/citizen/dashboard" className="font-semibold underline">View it in your dashboard</Link>
+                                                <button type="button" onClick={startNewComplaint} className="font-semibold underline">Submit these details as a new complaint</button>
+                                            </p>
+                                        )}
                                     </div>
                                 )}
 
@@ -263,21 +433,26 @@ export default function FileComplaintPage() {
 
                                 <div className="flex gap-4">
                                     <button
+                                        type="button"
                                         onClick={() => setStep(2)}
-                                        className="flex-1 bg-gray-100 text-gray-700 py-4 rounded-xl font-bold text-lg hover:bg-gray-200 transition-all"
+                                        disabled={busy}
+                                        className="flex-1 bg-gray-100 text-gray-700 py-4 rounded-xl font-bold text-lg hover:bg-gray-200 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                                     >
                                         Back
                                     </button>
                                     <button
+                                        type="button"
                                         onClick={handleSubmit}
-                                        disabled={loading}
+                                        disabled={busy || authLoading || !!profileProblem}
                                         className="flex-[2] bg-green-600 text-white py-4 rounded-xl font-bold text-lg hover:bg-green-700 transition-all shadow-lg shadow-green-200 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                                     >
-                                        {loading ? (
+                                        {busy ? (
                                             <>
                                                 <Loader2 className="animate-spin" size={20} />
-                                                Submitting...
+                                                <span role="status">{progress}</span>
                                             </>
+                                        ) : needsSignIn ? (
+                                            <>Sign in to submit <ArrowRight size={20} /></>
                                         ) : (
                                             <>
                                                 Submit Complaint <Send size={20} />
@@ -299,15 +474,15 @@ export default function FileComplaintPage() {
                                 </p>
                                 <div className="bg-gray-100 p-6 rounded-xl inline-block mb-8">
                                     <p className="text-xs text-gray-500 uppercase tracking-widest mb-1">Tracking ID</p>
-                                    <p className="text-3xl font-mono font-bold tracking-wider">{trackingId}</p>
+                                    <p data-testid="tracking-id" className="text-3xl font-mono font-bold tracking-wider">{trackingId}</p>
                                 </div>
                                 <div className="flex flex-col gap-4 max-w-xs mx-auto">
                                     <Link href="/citizen/dashboard" className="bg-noble-dark text-white py-3 rounded-lg font-medium hover:bg-opacity-90 text-center">
                                         Go to Dashboard
                                     </Link>
-                                    <Link href="/file-complaint" onClick={() => { setStep(1); setFormData(EMPTY_FORM); setFiles([]); setFileError(''); }} className="text-noble-dark font-medium hover:underline">
+                                    <button type="button" onClick={resetForm} className="text-noble-dark font-medium hover:underline">
                                         File Another Complaint
-                                    </Link>
+                                    </button>
                                 </div>
                             </div>
                         )}

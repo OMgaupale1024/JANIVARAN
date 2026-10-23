@@ -45,7 +45,7 @@ export function classifyComplaint(description: string, category: string): {
     const lowerDescription = description.toLowerCase();
 
     // Get department from category
-    const config = DEPARTMENT_CONFIG[category as keyof typeof DEPARTMENT_CONFIG] || DEPARTMENT_CONFIG['Other'];
+    const config = isValidCategory(category) ? DEPARTMENT_CONFIG[category] : DEPARTMENT_CONFIG['Other'];
 
     // Determine priority based on keywords
     const priority = determinePriority(lowerDescription);
@@ -81,10 +81,10 @@ function determinePriority(description: string): ComplaintPriority {
 }
 
 /**
- * Validate complaint category
+ * Validate complaint category (own keys only: "toString", "__proto__" etc. are not categories)
  */
-export function isValidCategory(category: string): boolean {
-    return category in DEPARTMENT_CONFIG;
+export function isValidCategory(category: unknown): category is keyof typeof DEPARTMENT_CONFIG {
+    return typeof category === 'string' && Object.hasOwn(DEPARTMENT_CONFIG, category);
 }
 
 /**

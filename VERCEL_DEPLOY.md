@@ -75,3 +75,13 @@ If you face issues, ensure the value is enclosed in quotes if using the CLI, or 
 Once deployed, you will get a URL like `jan-nivaran.vercel.app`.
 *   Go to your **Firebase Console** > **Authentication** > **Settings** > **Authorized Domains**.
 *   Add your Vercel domain (`jan-nivaran.vercel.app`) to the list to allow Google Sign-In and other auth providers to work.
+    Email/password sign-in does not depend on this list; Google sign-in fails on any domain missing from it.
+
+## Preview deployments
+
+Every pushed branch gets a Preview deployment, which uses the **Preview** environment variables. If only the
+`NEXT_PUBLIC_FIREBASE_*` values are set there, the pages load but every API route answers `503` (no Firebase
+Admin credentials) and no email is sent. To make a preview usable, add `FIREBASE_PROJECT_ID`,
+`FIREBASE_CLIENT_EMAIL` and `FIREBASE_PRIVATE_KEY` to Preview, and leave SMTP unset there or set
+`EMAIL_OVERRIDE_TO` to a test inbox. Note that a preview with those credentials writes to the same Firebase
+project as production.

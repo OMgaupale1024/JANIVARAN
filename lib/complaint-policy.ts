@@ -1,5 +1,5 @@
 import { ComplaintPriority, ComplaintStatus, UserRole } from '@/types/backend';
-import { DEPARTMENT_CONFIG } from '@/lib/engines/classification-engine';
+import { isValidCategory } from '@/lib/engines/classification-engine';
 
 /**
  * Server-side authorization and validation policy for complaints.
@@ -131,7 +131,7 @@ export function validateNewComplaint(body: unknown): Result<NewComplaintInput> {
     const unknownField = Object.keys(input).find(k => !COMPLAINT_FIELDS.includes(k));
     if (unknownField) return { ok: false, error: `Unexpected field: ${unknownField}` };
 
-    if (typeof input.category !== 'string' || !(input.category in DEPARTMENT_CONFIG)) {
+    if (!isValidCategory(input.category)) {
         return { ok: false, error: 'Invalid category' };
     }
     const description = text(input.description, 'Description', 10, 2000);

@@ -1,12 +1,20 @@
 // Unit tests for SLA, mapping and policy logic. Run: npm test
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const load = require('./load.cjs');
 
-const { calculateSLA, getSLADeadline } = load('@/lib/services/sla-service');
+// No Firebase Admin configuration or emulators: server code must fail as "unavailable"
+for (const key of ['FIREBASE_PROJECT_ID', 'FIREBASE_CLIENT_EMAIL', 'FIREBASE_PRIVATE_KEY', 'FIRESTORE_EMULATOR_HOST', 'FIREBASE_AUTH_EMULATOR_HOST']) {
+    delete process.env[key];
+}
+
+const load = require('./load.cjs');
+const { NextRequest } = require('next/server');
+
+const { calculateSLA, getSLADeadline, slaHoursForCategory } = load('@/lib/services/sla-service');
 const { isComplaintStalled, isSLABreached, getStalledStatusLabel } = load('@/lib/services/stalled-detection-service');
-const { complaintToGrievance } = load('@/lib/utils/type-mappers');
+const { complaintToGrievance, grievanceSLA } = load('@/lib/utils/type-mappers');
 const { getDashboardStats } = load('@/lib/services/dashboard-service');
+const { classifyComplaint, isValidCategory } = load('@/lib/engines/classification-engine');
 const policy = load('@/lib/complaint-policy');
 
 const HOUR = 60 * 60 * 1000;
@@ -27,15 +35,7 @@ function complaint(overrides = {}) {
 }
 
 // What the admin dashboard computes from the mapped Grievance
-const dashboardSLA = c => {
-    const g = complaintToGrievance(c);
-    return calculateSLA({
-        createdAt: g.submittedAt,
-        sla: { deadline: g.slaDeadline, assignedHours: g.slaHours },
-        status: g.status === 'RESOLVED' ? 'resolved' : 'open',
-        resolvedAt: g.resolvedAt,
-    }, NOW);
-};
+const dashboardSLA = c => grievanceSLA(complaintToGrievance(c), NOW);
 
 function assertAgreement(c) {
     const direct = calculateSLA(c, NOW);
@@ -81,9 +81,51 @@ test('resolved/closed complaints freeze the clock and are never stalled', () => 
     assert.equal(isComplaintStalled(resolvedOnTime, NOW), false);
 
     const withdrawnLate = complaint({ status: 'closed', createdAt: ago(200), hours: 24, closedAt: ago(100) });
-    assert.equal(calculateSLA(withdrawnLate, NOW).status, 'breached');
+    assert.equal(assertAgreement(withdrawnLate).status, 'breached');
+    assert.equal(dashboardSLA(withdrawnLate).closed, true);
     assert.equal(isComplaintStalled(withdrawnLate, NOW), false);
     assert.equal(getDashboardStats([withdrawnLate], NOW).breached, 0);
+});
+
+test('staff view keeps closed (withdrawn) complaints distinct from resolved ones', () => {
+    assert.equal(complaintToGrievance(complaint({ status: 'resolved', resolvedAt: ago(1) })).status, 'RESOLVED');
+    const withdrawn = complaintToGrievance(complaint({ status: 'closed', closedAt: ago(1), closedReason: 'withdrawn-by-citizen' }));
+    assert.equal(withdrawn.status, 'CLOSED');
+    assert.equal(withdrawn.closedReason, 'withdrawn-by-citizen');
+});
+
+test('inherited object keys are never categories', () => {
+    for (const name of ['toString', 'constructor', '__proto__', 'hasOwnProperty', 'valueOf']) {
+        assert.equal(isValidCategory(name), false, name);
+        assert.deepEqual(
+            policy.validateNewComplaint({ category: name, description: 'Pipe burst on main road', location: 'Ward 5' }),
+            { ok: false, error: 'Invalid category' },
+            name,
+        );
+        // Stored legacy data with such a category falls back to "Other" instead of undefined values
+        assert.deepEqual(classifyComplaint('Pipe burst on main road', name), { department: 'General Administration', slaHours: 120, priority: 'low' }, name);
+        assert.equal(slaHoursForCategory(name), 120, name);
+    }
+    assert.equal(isValidCategory('Water Supply'), true);
+    assert.equal(classifyComplaint('Pipe burst on main road', 'Water Supply').department, 'Water Department');
+});
+
+test('missing Firebase Admin configuration is reported as 503, not as an invalid session', async () => {
+    const { requireUser } = load('@/lib/server/auth');
+    const request = new Request('http://localhost/api/complaints', { headers: { authorization: 'Bearer any-token' } });
+    await assert.rejects(requireUser(request), err => err.status === 503);
+    await assert.rejects(requireUser(new Request('http://localhost/api/complaints')), err => err.status === 401);
+
+    const { POST } = load('@/app/api/complaints/route');
+    const res = await POST(new NextRequest('http://localhost/api/complaints', {
+        method: 'POST',
+        headers: { authorization: 'Bearer any-token', 'content-type': 'application/json' },
+        body: JSON.stringify({ category: 'Water Supply', description: 'Pipe burst on main road', location: 'Ward 5' }),
+    }));
+    assert.equal(res.status, 503);
+    const body = await res.json();
+    assert.equal(body.success, false);
+    assert.doesNotMatch(body.error, /session|sign in/i);
 });
 
 test('stalled detection uses time since the last status change', () => {

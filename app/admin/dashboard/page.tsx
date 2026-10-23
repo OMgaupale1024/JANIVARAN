@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import {
@@ -12,19 +12,21 @@ import DemoControls from '@/components/DemoControls';
 import { useAuth } from '@/lib/auth-context';
 import { apiFetch } from '@/lib/api-client';
 import { listenToComplaints } from '@/lib/services/complaint-query-service';
-import { complaintToGrievance } from '@/lib/utils/type-mappers';
-import { calculateSLA, formatRemainingTime } from '@/lib/services/sla-service';
+import { complaintToGrievance, grievanceSLA, isCompleted } from '@/lib/utils/type-mappers';
+import { formatRemainingTime } from '@/lib/services/sla-service';
 
-const slaFor = (g: Grievance, now: Date) => calculateSLA({
-    createdAt: g.submittedAt,
-    sla: { deadline: g.slaDeadline, assignedHours: g.slaHours },
-    status: g.status === 'RESOLVED' ? 'resolved' : 'open',
-    resolvedAt: g.resolvedAt,
-}, now.getTime());
+const slaFor = (g: Grievance, now: Date) => grievanceSLA(g, now.getTime());
+
+const STATUS_LABELS: Record<Grievance['status'], string> = {
+    NEW: 'New', PENDING: 'Pending', UNDER_REVIEW: 'Under Review', IN_PROGRESS: 'In Progress',
+    ESCALATED: 'Escalated', RESOLVED: 'Resolved', CLOSED: 'Closed',
+};
+const statusLabel = (g: Grievance) =>
+    g.status === 'CLOSED' && g.closedReason === 'withdrawn-by-citizen' ? 'Withdrawn' : STATUS_LABELS[g.status];
 
 export default function AdminDashboard() {
     const router = useRouter();
-    const { user, loading: authLoading, signOut } = useAuth();
+    const { user, loading: authLoading, authError, signOut } = useAuth();
     const [currentTime, setCurrentTime] = useState(new Date());
     const [grievances, setGrievances] = useState<Grievance[]>([]);
     const [listenError, setListenError] = useState<string | null>(null);
@@ -40,13 +42,19 @@ export default function AdminDashboard() {
         : listenError;
 
     const [filter, setFilter] = useState<'ALL' | 'ESCALATED'>('ALL');
-    const [selectedGrievance, setSelectedGrievance] = useState<Grievance | null>(null);
+    const [scope, setScope] = useState<'active' | 'completed' | 'all'>('active');
     const [view, setView] = useState<'dashboard' | 'all-complaints'>('dashboard');
+    // Track the selection by ID so the details always show the live record
+    const [selectedId, setSelectedId] = useState<string | null>(null);
+    const selectedGrievance = grievances.find(g => g.id === selectedId) ?? null;
+    const [savingId, setSavingId] = useState<string | null>(null);
+    const saving = useRef(false); // current even inside timers, unlike savingId
+    const autoReviewed = useRef(new Set<string>());
 
-    // Deny access to anyone who is not an official or authority
+    // Deny access to anyone who is not an official or authority (a profile that failed to load is shown, not redirected)
     useEffect(() => {
-        if (!authLoading && !isStaff) router.replace('/admin/login');
-    }, [authLoading, isStaff, router]);
+        if (!authLoading && !authError && !isStaff) router.replace('/admin/login');
+    }, [authLoading, authError, isStaff, router]);
 
     // Real-time listener scoped by role; never falls back to all complaints
     useEffect(() => {
@@ -59,7 +67,8 @@ export default function AdminDashboard() {
         const unsubscribe = listenToComplaints(
             options,
             (complaints) => {
-                setGrievances(complaints.map(complaintToGrievance));
+                // Newest first
+                setGrievances(complaints.map(complaintToGrievance).sort((a, b) => b.submittedAt.localeCompare(a.submittedAt)));
                 setListenError(null);
             },
             () => setListenError('Could not load complaints. Check your access or connection and refresh.')
@@ -78,7 +87,7 @@ export default function AdminDashboard() {
     const stats = { total: 0, onTrack: 0, atRisk: 0, breached: 0, escalated: 0 };
     grievances.forEach(g => {
         if (g.status === 'ESCALATED') stats.escalated++;
-        if (g.status === 'RESOLVED') return;
+        if (isCompleted(g)) return;
         stats.total++;
         const { status } = slaFor(g, currentTime);
         if (status === 'on-track') stats.onTrack++;
@@ -87,20 +96,15 @@ export default function AdminDashboard() {
     });
     const pct = (n: number) => (stats.total ? (n / stats.total) * 100 : 0);
 
-    // Generic update handler: status and/or priority are saved together server-side
+    // Status and/or priority are saved together server-side. The page shows only what the
+    // server confirmed (via the live listener), so there is nothing to roll back on failure,
+    // and one change at a time means requests cannot overlap.
     const updateGrievance = async (id: string, changes: { status?: string; priority?: string }) => {
-        const grievance = grievances.find(g => g.id === id);
-        if (!grievance) return;
+        if (saving.current) return;
+        saving.current = true;
+        autoReviewed.current.add(id); // an explicit change supersedes the automatic "under review"
+        setSavingId(id);
         setActionError(null);
-
-        // Optimistic Update
-        const updatedGrievance: Grievance = { ...grievance };
-        if (changes.status) updatedGrievance.status = changes.status.toUpperCase().replace('-', '_') as Grievance['status'];
-        if (changes.priority) updatedGrievance.priority = changes.priority.toUpperCase() as Grievance['priority'];
-
-        setGrievances(prev => prev.map(g => g.id === id ? updatedGrievance : g));
-        setSelectedGrievance(prev => prev && prev.id === id ? updatedGrievance : prev);
-
         try {
             await apiFetch(`/api/complaints/${id}`, {
                 method: 'PATCH',
@@ -109,20 +113,20 @@ export default function AdminDashboard() {
         } catch (error) {
             console.error('Update failed:', error);
             setActionError(error instanceof Error ? error.message : 'Update failed');
-            // Revert
-            setGrievances(prev => prev.map(g => g.id === id ? grievance : g));
-            setSelectedGrievance(prev => prev && prev.id === id ? grievance : prev);
+        } finally {
+            saving.current = false;
+            setSavingId(null);
         }
     };
 
-    // Auto-mark as under review when an official opens a pending complaint
-    const selectedId = selectedGrievance?.id;
+    // Auto-mark as under review when staff open a pending complaint: once per complaint, so a failure cannot loop
     const selectedStatus = selectedGrievance?.status;
     useEffect(() => {
-        if (!selectedId || selectedStatus !== 'PENDING') return;
-        const timer = setTimeout(() => updateGrievance(selectedId, { status: 'under-review' }), 1000);
+        if (!selectedId || selectedStatus !== 'PENDING' || autoReviewed.current.has(selectedId)) return;
+        const timer = setTimeout(() => {
+            if (!autoReviewed.current.has(selectedId)) updateGrievance(selectedId, { status: 'under-review' });
+        }, 1000);
         return () => clearTimeout(timer);
-        // eslint-disable-next-line react-hooks/exhaustive-deps -- re-run only when the selection or its status changes
     }, [selectedId, selectedStatus]);
 
     const handlePrioritize = (id: string) => {
@@ -139,12 +143,21 @@ export default function AdminDashboard() {
         router.replace('/admin/login');
     };
 
-    // Filter Logic
+    // Filter Logic: completed (resolved/closed) complaints stay findable under Completed and All
     const filteredGrievances = grievances.filter(g => {
-        if (g.status === 'RESOLVED') return false; // Auto-remove resolved
         if (filter === 'ESCALATED') return g.status === 'ESCALATED';
-        return true; // ALL (Active)
+        if (scope === 'active') return !isCompleted(g);
+        if (scope === 'completed') return isCompleted(g);
+        return true;
     });
+
+    if (authError) {
+        return (
+            <div role="alert" className="min-h-screen flex items-center justify-center bg-gray-50 p-6 text-sm text-red-600">
+                {authError}
+            </div>
+        );
+    }
 
     if (authLoading || !isStaff) {
         return (
@@ -156,7 +169,7 @@ export default function AdminDashboard() {
 
     // Helper to format SLA Timer
     const getSLADisplay = (g: Grievance) => {
-        if (g.status === 'RESOLVED') {
+        if (isCompleted(g)) {
             return (
                 <div className="text-right">
                     <div className="font-mono font-bold text-gray-400">Done</div>
@@ -292,7 +305,7 @@ export default function AdminDashboard() {
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-10">
                     {/* Total */}
                     <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100 relative overflow-hidden">
-                        <div className="text-gray-500 text-xs font-bold uppercase tracking-widest mb-2">Total Complaints</div>
+                        <div className="text-gray-500 text-xs font-bold uppercase tracking-widest mb-2">Active Complaints</div>
                         <div className="text-3xl font-bold text-gray-800">{stats.total}</div>
                     </div>
 
@@ -327,13 +340,28 @@ export default function AdminDashboard() {
                 {/* Live Feed Table - Only show in All Complaints view */}
                 {view === 'all-complaints' && (
                     <div className="bg-white rounded-2xl shadow-sm border border-gray-100 flex flex-col">
-                        <div className="p-6 border-b border-gray-100 flex justify-between items-center">
+                        <div className="p-6 border-b border-gray-100 flex flex-wrap gap-4 justify-between items-center">
                             <h3 className="font-bold text-lg flex items-center gap-2">
                                 <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
                                 {filter === 'ESCALATED' ? 'Escalated Complaints Feed' :
                                     role === 'OFFICIAL' && userDepartment ? `${userDepartment} Department Complaints` :
                                         'Live Complaints Feed'}
                             </h3>
+                            {filter === 'ALL' && (
+                                <div className="flex bg-gray-100 p-1 rounded-lg text-xs font-bold" aria-label="Show complaints">
+                                    {([['active', 'Active'], ['completed', 'Completed'], ['all', 'All']] as const).map(([s, label]) => (
+                                        <button
+                                            key={s}
+                                            type="button"
+                                            aria-pressed={scope === s}
+                                            onClick={() => setScope(s)}
+                                            className={`px-3 py-1.5 rounded-md ${scope === s ? 'bg-white shadow-sm text-noble-dark' : 'text-gray-500 hover:text-gray-700'}`}
+                                        >
+                                            {label}
+                                        </button>
+                                    ))}
+                                </div>
+                            )}
                         </div>
                         <div className="overflow-x-auto">
                             <table className="w-full text-left border-collapse">
@@ -371,12 +399,12 @@ export default function AdminDashboard() {
                                                 <td className="px-6 py-4">
                                                     {g.status === 'ESCALATED' ? (
                                                         <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800 animate-pulse">
-                                                            Escalated ({g.escalationLevel})
+                                                            Escalated
                                                         </span>
                                                     ) : (
-                                                        <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${g.status === 'RESOLVED' ? 'bg-green-100 text-green-800' : 'bg-blue-100 text-blue-800'
+                                                        <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${g.status === 'RESOLVED' ? 'bg-green-100 text-green-800' : g.status === 'CLOSED' ? 'bg-gray-100 text-gray-700' : 'bg-blue-100 text-blue-800'
                                                             }`}>
-                                                            {g.status.replace('_', ' ')}
+                                                            {statusLabel(g).toUpperCase()}
                                                         </span>
                                                     )}
                                                 </td>
@@ -385,12 +413,13 @@ export default function AdminDashboard() {
                                                 </td>
                                                 <td className="px-6 py-4 text-center">
                                                     <button
-                                                        onClick={() => setSelectedGrievance(g)}
+                                                        onClick={() => { setActionError(null); setSelectedId(g.id); }}
                                                         className="p-2 hover:bg-noble-dark/5 text-noble-dark rounded-full transition-colors group relative"
                                                         title="View Details"
+                                                        aria-label={`View details for ${g.title}`}
                                                     >
                                                         <Eye size={18} />
-                                                        {g.status !== 'RESOLVED' && role === 'OFFICIAL' && <span className="absolute top-0 right-0 w-2 h-2 bg-blue-500 rounded-full"></span>}
+                                                        {!isCompleted(g) && role === 'OFFICIAL' && <span className="absolute top-0 right-0 w-2 h-2 bg-blue-500 rounded-full"></span>}
                                                     </button>
                                                 </td>
                                             </tr>
@@ -406,19 +435,20 @@ export default function AdminDashboard() {
             {/* Details Modal */}
             {selectedGrievance && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-fade-in">
-                    <div className="bg-white rounded-2xl shadow-2xl max-w-4xl w-full flex flex-col max-h-[90vh] overflow-hidden animate-scale-up">
+                    <div role="dialog" aria-modal="true" aria-labelledby="complaint-dialog-title" className="bg-white rounded-2xl shadow-2xl max-w-4xl w-full flex flex-col max-h-[90vh] overflow-hidden animate-scale-up">
 
                         {/* Modal Header */}
                         <div className="p-6 border-b border-gray-100 flex justify-between items-start bg-gray-50">
                             <div>
                                 <div className="text-xs font-bold uppercase tracking-widest text-gray-400 mb-2">{selectedGrievance.trackingId || selectedGrievance.id}</div>
-                                <h2 className="text-2xl font-serif font-bold text-noble-dark">{selectedGrievance.title}</h2>
+                                <h2 id="complaint-dialog-title" className="text-2xl font-serif font-bold text-noble-dark">{selectedGrievance.title}</h2>
                                 <div className="flex items-center gap-3 mt-2">
+                                    <span data-testid="complaint-status" className="bg-blue-100 text-blue-800 px-2 py-1 rounded text-xs font-bold">{statusLabel(selectedGrievance)}</span>
                                     <span className="bg-gray-200 text-gray-700 px-2 py-1 rounded text-xs font-bold">{selectedGrievance.category}</span>
                                     {selectedGrievance.priority === 'CRITICAL' && <span className="bg-red-100 text-red-700 px-2 py-1 rounded text-xs font-bold">CRITICAL PRIORITY</span>}
                                 </div>
                             </div>
-                            <button onClick={() => setSelectedGrievance(null)} className="p-2 hover:bg-gray-200 rounded-full transition-colors" aria-label="Close details">
+                            <button onClick={() => setSelectedId(null)} className="p-2 hover:bg-gray-200 rounded-full transition-colors" aria-label="Close details">
                                 <X size={24} className="text-gray-500" />
                             </button>
                         </div>
@@ -464,13 +494,19 @@ export default function AdminDashboard() {
                             <div className="space-y-6">
                                 <div className="bg-gray-50 p-6 rounded-xl border border-gray-100">
                                     <h3 className="font-bold text-lg mb-4">Official Actions</h3>
+                                    {actionError && (
+                                        <p role="alert" className="mb-3 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">{actionError}</p>
+                                    )}
+                                    {savingId === selectedGrievance.id && (
+                                        <p role="status" className="mb-3 text-sm text-gray-500">Saving…</p>
+                                    )}
 
                                     <div className="space-y-3">
                                         {/* Authority Actions */}
                                         {role === 'AUTHORITY' && (
                                             <button
                                                 onClick={() => handlePrioritize(selectedGrievance.id)}
-                                                disabled={selectedGrievance.priority === 'CRITICAL' || selectedGrievance.status === 'RESOLVED'}
+                                                disabled={!!savingId || selectedGrievance.priority === 'CRITICAL' || isCompleted(selectedGrievance)}
                                                 className="w-full flex items-center justify-between p-4 bg-white border border-gray-200 rounded-lg hover:border-red-300 hover:shadow-md transition-all group disabled:opacity-50 disabled:cursor-not-allowed"
                                             >
                                                 <span className="font-medium text-gray-700 group-hover:text-red-600">Mark as Critical Priority</span>
@@ -481,7 +517,7 @@ export default function AdminDashboard() {
                                         {/* Official & Authority Actions */}
                                         <button
                                             onClick={() => handleInProgress(selectedGrievance.id)}
-                                            disabled={selectedGrievance.status === 'IN_PROGRESS' || selectedGrievance.status === 'RESOLVED' || selectedGrievance.status === 'ESCALATED'}
+                                            disabled={!!savingId || selectedGrievance.status === 'IN_PROGRESS' || isCompleted(selectedGrievance) || selectedGrievance.status === 'ESCALATED'}
                                             className="w-full flex items-center justify-between p-4 bg-white border border-gray-200 rounded-lg hover:border-blue-300 hover:shadow-md transition-all group disabled:opacity-50 disabled:cursor-not-allowed"
                                         >
                                             <span className="font-medium text-gray-700 group-hover:text-blue-600">Mark as In Progress</span>
@@ -493,7 +529,7 @@ export default function AdminDashboard() {
                                             <>
                                                 <button
                                                     onClick={() => handleClose(selectedGrievance.id)}
-                                                    disabled={selectedGrievance.status === 'RESOLVED'}
+                                                    disabled={!!savingId || isCompleted(selectedGrievance)}
                                                     className="w-full flex items-center justify-between p-4 bg-noble-dark text-white rounded-lg hover:bg-black shadow-lg hover:shadow-xl transition-all disabled:opacity-50 disabled:bg-gray-500 disabled:cursor-not-allowed"
                                                 >
                                                     <span className="font-bold">Close & Resolve Complaint</span>
@@ -502,7 +538,7 @@ export default function AdminDashboard() {
 
                                                 <button
                                                     onClick={() => updateGrievance(selectedGrievance.id, { status: 'under-review' })}
-                                                    disabled={selectedGrievance.status === 'UNDER_REVIEW' || selectedGrievance.status === 'RESOLVED'}
+                                                    disabled={!!savingId || selectedGrievance.status === 'UNDER_REVIEW' || isCompleted(selectedGrievance)}
                                                     className="w-full flex items-center justify-between p-4 bg-amber-50 border border-amber-200 rounded-lg hover:bg-amber-100 hover:border-amber-300 text-amber-800 transition-all mt-4 disabled:opacity-50 disabled:bg-gray-100 disabled:border-gray-200 disabled:text-gray-400 disabled:cursor-not-allowed group"
                                                     title="Flag this complaint for review (e.g., if it appears fake or invalid)"
                                                 >
@@ -520,7 +556,7 @@ export default function AdminDashboard() {
                                         <Clock size={24} className="text-gray-400" />
                                         <div>
                                             <div className="text-2xl font-mono font-bold text-noble-dark">
-                                                {selectedGrievance.status === 'RESOLVED'
+                                                {isCompleted(selectedGrievance)
                                                     ? 'Done'
                                                     : formatRemainingTime(slaFor(selectedGrievance, currentTime).remainingHours)}
                                             </div>

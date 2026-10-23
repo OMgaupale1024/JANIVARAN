@@ -2,15 +2,14 @@
 
 import React, { useState } from 'react';
 import Link from 'next/link';
-import { Search, MapPin, Home } from 'lucide-react';
+import { Search, Home } from 'lucide-react';
 import ComplaintTimeline, { TimelineComplaint } from '@/components/ComplaintTimeline';
 
-// Public tracking view returned by /api/track (no personal details)
+// Public tracking view returned by /api/track (no personal details or free text)
 type TrackedComplaint = TimelineComplaint & {
     trackingId: string;
-    title: string;
-    location: string;
     priority: string;
+    category: string;
     department?: string;
 };
 
@@ -115,14 +114,11 @@ export default function TrackComplaint() {
                         <div className="p-8">
                             <div className="flex flex-col md:flex-row gap-6 md:gap-12 mb-8 border-b border-gray-100 pb-8">
                                 <div>
-                                    <h2 className="text-xl font-bold text-gray-800 mb-2">{complaint.title}</h2>
-                                    <p className="text-gray-600">{complaint.category}{complaint.department ? ` • ${complaint.department}` : ''}</p>
+                                    <h2 className="text-xl font-bold text-gray-800 mb-2">{complaint.category}</h2>
+                                    <p className="text-gray-600">{complaint.department ?? 'Department not assigned'}</p>
+                                    <p className="text-xs text-gray-400 mt-2">Details and location are visible only to the citizen and the officials handling it.</p>
                                 </div>
                                 <div className="shrink-0 space-y-2 text-sm text-gray-500">
-                                    <div className="flex items-center gap-2">
-                                        <MapPin size={16} />
-                                        <span>{complaint.location}</span>
-                                    </div>
                                     <div className="flex items-center gap-2">
                                         <div className={`w-2 h-2 rounded-full ${complaint.priority === 'critical' ? 'bg-red-500' :
                                             complaint.priority === 'high' ? 'bg-orange-500' : 'bg-blue-500'

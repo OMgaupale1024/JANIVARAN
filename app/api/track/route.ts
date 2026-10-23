@@ -2,10 +2,11 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getComplaintByTrackingIdAdmin, serialize, TRACKING_ID } from '@/lib/services/admin/complaint-service-admin';
 import { errorResponse } from '@/lib/server/auth';
 
-// Fields safe to show to anyone holding a tracking ID. Citizen identity,
-// description, evidence and tickets are excluded: tracking IDs are short.
+// Fields safe to show to anyone holding a tracking ID. Tracking IDs are short
+// and guessable, so citizen identity, evidence, tickets and all free text
+// (title, description, location: they can contain addresses or names) are excluded.
 const PUBLIC_FIELDS = [
-    'trackingId', 'title', 'category', 'department', 'assignedDepartment', 'status', 'priority', 'location', 'sla',
+    'trackingId', 'category', 'department', 'assignedDepartment', 'status', 'priority', 'sla',
     'createdAt', 'updatedAt', 'underReviewAt', 'assignedAt', 'inProgressAt', 'escalatedAt', 'resolvedAt', 'closedAt',
 ] as const;
 

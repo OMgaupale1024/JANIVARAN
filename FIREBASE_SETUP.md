@@ -23,7 +23,9 @@
 1. Go to **Firestore Database** → **Create database**
 2. Start in **production mode**
 3. Choose location `asia-south1` (matches `firebase.json`)
-4. Go to **Storage** → **Get started** (complaint photo evidence is stored here)
+4. Go to **Storage** → **Get started** (complaint photo evidence is stored here). New default buckets
+   (`<project>.firebasestorage.app`) need the Blaze plan. Without a bucket, photo uploads cannot succeed:
+   the form gives up after about 20 seconds and asks the citizen to retry or submit without photos.
 
 ### Step 4: Get Firebase Configuration
 
@@ -50,16 +52,45 @@ Verify afterwards in the console (**Firestore → Rules**, **Storage → Rules**
 that the published rules match `firestore.rules` / `storage.rules`. Until they are deployed the
 project keeps whatever rules it had before (the previous rules allowed everyone to read and write).
 
-### Step 7: Create Staff Accounts
+### Step 7: Grant (and revoke) Authority or Official access
 
-Self-signup always creates a `citizen`. Roles are assigned only by an administrator:
+The app trusts only the `role` (and, for officials, `department`) stored in Firestore at `users/{uid}`,
+where `{uid}` is the person's Firebase Authentication UID. Public signup always creates a `citizen`, and
+security rules stop every browser, including an Authority's, from changing `role` or `department`. So
+roles are changed by someone with access to the Firebase console:
 
-1. The staff member signs up through the app
-2. Firebase Console → Firestore → `users/{uid}`
-3. Set `role` to `"official"` and `department` to the exact department name used on complaints
-   (`Water Department`, `Electricity Board`, `Sanitation Department`, `Public Works Department`,
-   `Transport Department`, `General Administration`), or set `role` to `"admin"` for an Authority
-4. Staff sign in at `/admin/login`
+1. **Email/Password sign-in must be enabled**: Authentication → Sign-in method → Email/Password → Enable.
+   (It is enabled for `jan-nivaran`.)
+2. **The person registers themselves** at `/citizen/signup` with their own email and password. This creates
+   their Authentication account and a `users/{uid}` profile with `role: "citizen"`. Never create or share
+   an account on their behalf.
+3. **Find the exact profile**: Authentication → Users → search their email → copy the **User UID**.
+   Then Firestore Database → `users` → open the document whose ID is exactly that UID, and check its `email`
+   matches. Don't create a new document.
+4. **Change only the role field**, leaving everything else as it is:
+   - Authority: set `role` to `admin` (string).
+   - Official: set `role` to `official` and add a string field `department` with one exact department name:
+     `Water Department`, `Electricity Board`, `Sanitation Department`, `Public Works Department`,
+     `Transport Department` or `General Administration`. An official with a missing or misspelt department
+     sees no complaints and cannot be assigned any.
+5. **The person signs out and back in** at `/admin/login`, choosing **Authority** or **Official** to match.
+   Check the scope: an Authority sees all departments and can resolve, prioritise, assign and delete; an
+   official sees only their department and can mark complaints Under Review or In Progress.
+
+**Revoking or demoting.** Set `role` back to `citizen` and delete `department`. The API reads the role on
+every request, so staff actions stop at once; pages already open keep their current view until reloaded,
+so ask the person to sign out. To cut access off completely, also disable the account (Authentication →
+Users → ⋮ → Disable account); sign-in tokens issued earlier expire within an hour.
+
+**Application admin is not project ownership.** `role: "admin"` gives Authority powers inside JanNivaran
+only. It does not grant any access to the Firebase console or Google Cloud, and it cannot change anyone's
+role. People who need to manage roles themselves should get their own Google account added under Project
+settings → Users and permissions, with the least privileged role that lets them edit Firestore. Never
+share the project owner's Google credentials. Do not "grant" roles through localStorage, a role choice at
+signup, or by relaxing the rules: the app ignores the first two and the rules exist to prevent the third.
+
+**Demo accounts** are not created this way: `scripts/provision-demo.mjs` creates the three demo identities
+with the Admin SDK and refuses to modify accounts it did not create. See [DEMO_GUIDE.md](DEMO_GUIDE.md).
 
 ## 📊 Database Collections
 

@@ -7,13 +7,13 @@ import {
     serialize,
     updateComplaintAdmin,
 } from '@/lib/services/admin/complaint-service-admin';
-import { sendStatusChangeEmail, sendComplaintRoutedEmail, DeliveryStatus } from '@/lib/services/notification-service';
+import { complaintRoutedEmail, queueEmail, statusChangeEmail } from '@/lib/services/notification-service';
 import { canViewComplaint, isStaffFor } from '@/lib/complaint-policy';
 import { errorResponse, HttpError, readJson, requireUser } from '@/lib/server/auth';
 
 type Params = { params: Promise<{ id: string }> };
 
-const PATCH_FIELDS = ['action', 'status', 'priority', 'officialId', 'departmentName'];
+const PATCH_FIELDS = ['action', 'status', 'priority', 'officialId'];
 
 /**
  * GET /api/complaints/[id]
@@ -71,16 +71,13 @@ export async function PATCH(request: NextRequest, props: Params) {
             return NextResponse.json({ success: true, message: 'No changes', notification: 'skipped' });
         }
 
-        // Notify the citizen after the change is committed; delivery outcome is reported, not assumed
+        // The change is committed; the citizen is emailed after the response (best effort)
         const { complaint } = result;
-        let notification: DeliveryStatus = 'skipped';
+        let notification: 'queued' | 'skipped' = 'skipped';
         if (complaint.citizenEmail && result.newStatus && result.oldStatus) {
-            if (changes.officialId !== undefined) {
-                const deptName = typeof body.departmentName === 'string' ? body.departmentName.slice(0, 100) : complaint.assignedDepartment;
-                notification = await sendComplaintRoutedEmail({ ...complaint, status: result.newStatus }, complaint.citizenEmail, deptName);
-            } else {
-                notification = await sendStatusChangeEmail(complaint, complaint.citizenEmail, result.oldStatus, result.newStatus);
-            }
+            notification = queueEmail(changes.officialId !== undefined
+                ? complaintRoutedEmail({ ...complaint, status: result.newStatus }, complaint.citizenEmail)
+                : statusChangeEmail(complaint, complaint.citizenEmail, result.oldStatus, result.newStatus));
         }
 
         return NextResponse.json({ success: true, message: 'Complaint updated', notification });

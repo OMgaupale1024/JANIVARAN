@@ -1,16 +1,18 @@
-import { randomInt, randomUUID } from 'crypto';
+import { createHash, randomInt, randomUUID } from 'crypto';
 import { FieldValue, Timestamp, Transaction } from 'firebase-admin/firestore';
 import { adminBucket, adminDb } from '@/lib/firebase-admin';
 import { HttpError, AuthUser } from '@/lib/server/auth';
 import { classifyComplaint } from '@/lib/engines/classification-engine';
 import {
     Actor, NewComplaintInput, STATUS_TIMESTAMP_FIELD, MAX_TICKETS_PER_COMPLAINT, MAX_PHOTO_BYTES, PHOTO_CONTENT_TYPES,
-    checkPriorityChange, checkStatusChange, deletionMode, evidencePathFromURL, isStaffFor,
+    checkPriorityChange, checkStatusChange, complaintDepartment, deletionMode, evidencePathFromURL, isStaffFor,
 } from '@/lib/complaint-policy';
 import { Complaint, ComplaintPriority, ComplaintStatus } from '@/types/backend';
 
 const COMPLAINTS = 'complaints';
 const AUDIT_LOGS = 'auditLogs';
+// Server-only: one record per (user, request ID) pointing at the complaint it created
+const COMPLAINT_REQUESTS = 'complaintRequests';
 const HOUR_MS = 60 * 60 * 1000;
 
 // Server-side complaint records carry Admin SDK Timestamps
@@ -18,6 +20,9 @@ export type StoredComplaint = Complaint;
 
 const DOC_ID = /^[A-Za-z0-9_-]{1,128}$/;
 export const TRACKING_ID = /^JAN-\d{6}$/;
+export const REQUEST_ID = /^[A-Za-z0-9_-]{16,128}$/;
+
+const sha256 = (value: string) => createHash('sha256').update(value).digest('hex');
 
 function complaintRef(id: string) {
     if (!DOC_ID.test(id)) throw new HttpError(400, 'Invalid complaint ID');
@@ -90,8 +95,14 @@ async function verifyEvidence(urls: string[], uid: string): Promise<void> {
  * Create a complaint. Classification, SLA deadline and a unique tracking ID
  * are assigned server-side; the tracking ID is reserved in trackingIds/{id}
  * inside the same transaction so two complaints can never share one.
+ *
+ * With a requestId, the (user, requestId) record is created in that same
+ * transaction, so a retry of the same request returns the original complaint
+ * (replayed) and a reuse with different details is rejected with 409.
  */
-export async function createComplaintAdmin(input: NewComplaintInput, user: AuthUser): Promise<StoredComplaint> {
+export async function createComplaintAdmin(
+    input: NewComplaintInput, user: AuthUser, requestId?: string,
+): Promise<{ complaint: StoredComplaint; replayed: boolean }> {
     await verifyEvidence(input.photoURLs, user.uid);
 
     const db = adminDb();
@@ -118,21 +129,35 @@ export async function createComplaintAdmin(input: NewComplaintInput, user: AuthU
         lastStatusChange: now,
     };
 
+    const request = requestId ? db.collection(COMPLAINT_REQUESTS).doc(sha256(`${user.uid}\n${requestId}`)) : null;
+    const fingerprint = sha256(JSON.stringify(input));
+
     for (let attempt = 0; attempt < 5; attempt++) {
         const trackingId = `JAN-${randomInt(100000, 1000000)}`;
         const reservation = db.collection('trackingIds').doc(trackingId);
-        const created = await db.runTransaction(async tx => {
-            const [reserved, legacy] = await Promise.all([
+        const outcome = await db.runTransaction(async tx => {
+            const [prior, reserved, legacy] = await Promise.all([
+                request ? tx.get(request) : null,
                 tx.get(reservation),
                 tx.get(db.collection(COMPLAINTS).where('trackingId', '==', trackingId).limit(1)),
             ]);
-            if (reserved.exists || !legacy.empty) return false;
+            if (prior?.exists) {
+                const original = await tx.get(db.collection(COMPLAINTS).doc(prior.get('complaintId')));
+                if (!original.exists) throw new HttpError(409, 'This submission was already processed');
+                if (prior.get('fingerprint') !== fingerprint) {
+                    throw new HttpError(409, 'This request was already used for a different complaint', { trackingId: original.get('trackingId') });
+                }
+                return { id: original.id, ...original.data() } as StoredComplaint;
+            }
+            if (reserved.exists || !legacy.empty) return null; // tracking ID taken: try another
             tx.create(reservation, { complaintId: ref.id, createdAt: now });
             tx.create(ref, { ...data, trackingId });
+            if (request) tx.create(request, { uid: user.uid, requestId, complaintId: ref.id, fingerprint, createdAt: now });
             writeAudit(tx, user, ref.id, 'created', { newValue: { status: 'pending', department, priority } });
-            return true;
+            return 'created' as const;
         });
-        if (created) return { id: ref.id, trackingId, ...data } as unknown as StoredComplaint;
+        if (outcome === 'created') return { complaint: { id: ref.id, trackingId, ...data } as unknown as StoredComplaint, replayed: false };
+        if (outcome) return { complaint: outcome, replayed: true };
     }
     throw new HttpError(503, 'Could not allocate a tracking ID. Please try again.');
 }
@@ -164,8 +189,12 @@ export async function updateComplaintAdmin(id: string, actor: AuthUser, changes:
         if (changes.officialId !== undefined) {
             if (actor.role !== 'admin') throw new HttpError(403, 'Only an authority can assign complaints');
             if (typeof changes.officialId !== 'string' || !DOC_ID.test(changes.officialId)) throw new HttpError(400, 'Invalid official');
-            const official = await tx.get(db.collection('users').doc(changes.officialId));
-            if (official.data()?.role !== 'official') throw new HttpError(400, 'Assignee must be an official');
+            const official = (await tx.get(db.collection('users').doc(changes.officialId))).data();
+            if (official?.role !== 'official') throw new HttpError(400, 'Assignee must be an official');
+            // Access follows assignedDepartment, so only an official of that department could work it
+            const department = complaintDepartment(complaint);
+            if (!department) throw new HttpError(409, 'This complaint has no department to assign within');
+            if (official.department !== department) throw new HttpError(400, `Assignee must be an official of ${department}`);
             Object.assign(update, { assignedTo: changes.officialId, assignedAt: now });
             audits.push(['assigned', { oldValue: complaint.assignedTo ?? null, newValue: changes.officialId }]);
             if (complaint.status !== 'in-progress' && !checkStatusChange(actor, complaint, 'in-progress')) nextStatus = 'in-progress';

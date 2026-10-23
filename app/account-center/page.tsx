@@ -11,7 +11,7 @@ import SLATracker from '@/components/SLATracker';
 
 export default function AccountCenter() {
     const router = useRouter();
-    const { user, loading: authLoading } = useAuth();
+    const { user, loading: authLoading, authError } = useAuth();
     const [complaints, setComplaints] = useState<Complaint[] | null>(null);
     const [loadError, setLoadError] = useState<string | null>(null);
     const [selectedComplaint, setSelectedComplaint] = useState<Complaint | null>(null);
@@ -19,10 +19,10 @@ export default function AccountCenter() {
     const [statusFilter, setStatusFilter] = useState<string>('all');
     const loading = complaints === null && !loadError;
 
-    // Redirect only once auth state is known, so a refresh keeps the session
+    // Redirect only once auth state is known, so a refresh keeps the session (a profile that failed to load is shown instead)
     useEffect(() => {
-        if (!authLoading && !user) router.push('/citizen');
-    }, [authLoading, user, router]);
+        if (!authLoading && !user && !authError) router.push('/citizen');
+    }, [authLoading, user, authError, router]);
 
     useEffect(() => {
         if (!user) return;
@@ -58,6 +58,9 @@ export default function AccountCenter() {
         }
     };
 
+    if (authError) {
+        return <div role="alert" className="min-h-screen flex items-center justify-center p-6 text-red-600">{authError}</div>;
+    }
     if (!user) return null;
 
     return (

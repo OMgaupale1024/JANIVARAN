@@ -1,5 +1,5 @@
 export type Department = 'Water' | 'Electricity' | 'Sanitation' | 'Roads' | 'Other';
-export type GrievanceStatus = 'PENDING' | 'IN_PROGRESS' | 'ESCALATED' | 'RESOLVED' | 'NEW' | 'UNDER_REVIEW';
+export type GrievanceStatus = 'PENDING' | 'IN_PROGRESS' | 'ESCALATED' | 'RESOLVED' | 'CLOSED' | 'NEW' | 'UNDER_REVIEW';
 export type SLAState = 'ON_TRACK' | 'AT_RISK' | 'BREACHED';
 export type UserRole = 'CITIZEN' | 'OFFICIAL' | 'AUTHORITY';
 export type EscalationLevel = 'NONE' | 'L1_DEPT_HEAD' | 'L2_DISTRICT_DM' | 'L3_STATE_SEC';
@@ -21,6 +21,7 @@ export interface Grievance {
     department?: Department;
     location: string;
     status: GrievanceStatus;
+    closedReason?: string; // e.g. 'withdrawn-by-citizen'
     priority: Priority;
 
     // Timestamps

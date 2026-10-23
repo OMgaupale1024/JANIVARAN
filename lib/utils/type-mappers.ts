@@ -1,6 +1,6 @@
 import { Complaint, ComplaintStatus, ComplaintPriority } from '@/types/backend';
 import { Grievance, GrievanceHistory, GrievanceStatus, Priority } from '@/lib/types';
-import { getSLADeadline, toMillis } from '@/lib/services/sla-service';
+import { calculateSLA, getSLADeadline, toMillis } from '@/lib/services/sla-service';
 
 const STATUS_MAP: Record<ComplaintStatus, GrievanceStatus> = {
     'pending': 'PENDING',
@@ -8,8 +8,21 @@ const STATUS_MAP: Record<ComplaintStatus, GrievanceStatus> = {
     'in-progress': 'IN_PROGRESS',
     'resolved': 'RESOLVED',
     'escalated': 'ESCALATED',
-    'closed': 'RESOLVED',
+    'closed': 'CLOSED', // withdrawn or closed without resolution: not the same as resolved
 };
+
+/** Resolved and closed complaints are finished; work and the SLA clock have stopped. */
+export const isCompleted = (g: Pick<Grievance, 'status'>) => g.status === 'RESOLVED' || g.status === 'CLOSED';
+
+/** Live SLA for a mapped grievance (same answer as sla-service gives for the stored complaint). */
+export function grievanceSLA(g: Grievance, now: number) {
+    return calculateSLA({
+        createdAt: g.submittedAt,
+        sla: { deadline: g.slaDeadline, assignedHours: g.slaHours },
+        status: isCompleted(g) ? 'resolved' : 'open',
+        resolvedAt: g.resolvedAt,
+    }, now);
+}
 
 const PRIORITY_MAP: Record<ComplaintPriority, Priority> = {
     'low': 'LOW',
@@ -56,6 +69,7 @@ export function complaintToGrievance(complaint: Complaint): Grievance {
         category: complaint.category,
         location: complaint.location,
         status: STATUS_MAP[complaint.status] || 'PENDING',
+        closedReason: complaint.closedReason,
         priority: PRIORITY_MAP[complaint.priority] || 'MEDIUM',
         submittedAt,
         updatedAt: iso(complaint.updatedAt),

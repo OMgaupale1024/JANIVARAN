@@ -7,61 +7,54 @@ export interface AuthorityContact {
     level: 'Department Head' | 'Senior Official' | 'Director';
 }
 
-// Mock authority contacts, keyed by complaint category
+// DEMO DATA: there is no verified directory of officials. These placeholders use an unassigned
+// phone format and the reserved .example domain so nobody real can be called or emailed.
 const AUTHORITY_CONTACTS: Record<string, AuthorityContact> = {
     'Roads & Potholes': {
-        name: 'Rajesh Kumar',
+        name: 'Public Works duty officer (demo)',
         designation: 'Chief Engineer',
         department: 'Public Works Department',
-        phone: '+91-11-2345-6789',
-        email: 'rajesh.kumar@pwd.gov.in',
+        phone: '+91-00000-00001 (demo)',
+        email: 'pwd-desk@jannivaran.example',
         level: 'Department Head',
     },
-    'Health Services': {
-        name: 'Dr. Priya Sharma',
-        designation: 'Director of Health Services',
-        department: 'Health Department',
-        phone: '+91-11-2345-6790',
-        email: 'priya.sharma@health.gov.in',
-        level: 'Director',
-    },
     'Water Supply': {
-        name: 'Amit Patel',
+        name: 'Water Supply duty officer (demo)',
         designation: 'Executive Engineer',
         department: 'Water Supply Department',
-        phone: '+91-11-2345-6791',
-        email: 'amit.patel@water.gov.in',
+        phone: '+91-00000-00002 (demo)',
+        email: 'water-desk@jannivaran.example',
         level: 'Senior Official',
     },
     'Electricity': {
-        name: 'Sunita Reddy',
+        name: 'Electricity Board duty officer (demo)',
         designation: 'Superintending Engineer',
         department: 'Electricity Board',
-        phone: '+91-11-2345-6792',
-        email: 'sunita.reddy@electricity.gov.in',
+        phone: '+91-00000-00003 (demo)',
+        email: 'power-desk@jannivaran.example',
         level: 'Senior Official',
     },
     'Sanitation & Waste': {
-        name: 'Vikram Singh',
+        name: 'Sanitation duty officer (demo)',
         designation: 'Municipal Commissioner',
         department: 'Sanitation Department',
-        phone: '+91-11-2345-6793',
-        email: 'vikram.singh@sanitation.gov.in',
+        phone: '+91-00000-00004 (demo)',
+        email: 'sanitation-desk@jannivaran.example',
         level: 'Department Head',
     },
     'Default': {
-        name: 'Administrative Officer',
+        name: 'Administrative duty officer (demo)',
         designation: 'Senior Administrative Officer',
         department: 'General Administration',
-        phone: '+91-11-2345-6700',
-        email: 'admin@jannivaran.gov.in',
+        phone: '+91-00000-00000 (demo)',
+        email: 'admin-desk@jannivaran.example',
         level: 'Senior Official',
     },
 };
 
 /**
- * Get authority contact for a complaint category
+ * Get the (demo) authority contact for a complaint category
  */
 export function getAuthorityContact(category?: string): AuthorityContact {
-    return AUTHORITY_CONTACTS[category || 'Default'] || AUTHORITY_CONTACTS.Default;
+    return category && Object.hasOwn(AUTHORITY_CONTACTS, category) ? AUTHORITY_CONTACTS[category] : AUTHORITY_CONTACTS.Default;
 }
