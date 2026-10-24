@@ -1,5 +1,5 @@
 import { ComplaintPriority, ComplaintStatus, UserRole } from '@/types/backend';
-import { DEPARTMENT_CONFIG } from '@/lib/engines/classification-engine';
+import { DEPARTMENT_CONFIG, isValidCategory } from '@/lib/engines/classification-engine';
 
 /**
  * Server-side authorization and validation policy for complaints.
@@ -10,7 +10,8 @@ import { DEPARTMENT_CONFIG } from '@/lib/engines/classification-engine';
  *  - citizen:  files complaints; sees and acts only on their own.
  *  - official: sees and works complaints routed to their department.
  *  - admin ("Authority"): sees everything; exclusive rights to resolve/close,
- *              change priority, assign, and permanently delete.
+ *              change priority, assign, transfer between departments, and
+ *              permanently delete.
  *
  * Withdrawal vs deletion:
  *  - A citizen may WITHDRAW their own complaint while it is still pending or
@@ -67,6 +68,50 @@ export const MAX_TICKETS_PER_COMPLAINT = 10;
 export const MAX_PHOTOS = 3;
 export const MAX_PHOTO_BYTES = 5 * 1024 * 1024;
 export const PHOTO_CONTENT_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
+export const MAX_LOCATION = 300;
+// The configured handling departments: the only valid transfer destinations
+export const DEPARTMENTS: string[] = Object.values(DEPARTMENT_CONFIG).map(c => c.department);
+
+// One "(GPS …)" suffix at the end of the location text
+const GPS_SUFFIX = /\s*\(?GPS [^)]*\)?$/;
+const COARSE_FIX_METRES = 1000;
+
+/**
+ * Location text with the browser's fix appended: what the citizen typed is
+ * kept (shortened if needed so the fix fits), and an earlier fix is replaced
+ * rather than duplicated. A broad estimate is labelled approximate, with
+ * fewer decimals, so it never reads as a precise position.
+ */
+export function withGpsFix(location: string, coords: { latitude: number; longitude: number; accuracy: number }): string {
+    const coarse = coords.accuracy > COARSE_FIX_METRES;
+    const digits = coarse ? 3 : 5;
+    const accuracy = coarse ? `±${(coords.accuracy / 1000).toFixed(1)} km, approximate` : `±${Math.round(coords.accuracy)} m`;
+    const fix = `GPS ${coords.latitude.toFixed(digits)}, ${coords.longitude.toFixed(digits)} ${accuracy}`;
+    const typed = location.replace(GPS_SUFFIX, '').trim().slice(0, MAX_LOCATION - fix.length - 3).trim();
+    return typed ? `${typed} (${fix})` : fix;
+}
+
+/**
+ * The status a citizen sees, one per complaint. Closed splits into withdrawn
+ * by the citizen, resolved and later closed (it carries resolvedAt), and
+ * closed without resolution.
+ */
+export const CITIZEN_STATUSES = [
+    { key: 'pending', label: 'Pending' },
+    { key: 'under-review', label: 'Under Review' },
+    { key: 'in-progress', label: 'In Progress' },
+    { key: 'escalated', label: 'Escalated' },
+    { key: 'resolved', label: 'Resolved' },
+    { key: 'closed', label: 'Closed without resolution' },
+    { key: 'withdrawn', label: 'Withdrawn' },
+] as const;
+export type CitizenStatus = typeof CITIZEN_STATUSES[number]['key'];
+
+export function citizenStatus(c: { status: ComplaintStatus; closedReason?: string; resolvedAt?: unknown }): CitizenStatus {
+    if (c.status !== 'closed') return c.status;
+    if (c.closedReason === 'withdrawn-by-citizen') return 'withdrawn';
+    return c.resolvedAt ? 'resolved' : 'closed';
+}
 
 export function complaintDepartment(c: ComplaintScope): string | undefined {
     return c.assignedDepartment ?? c.department;
@@ -131,12 +176,12 @@ export function validateNewComplaint(body: unknown): Result<NewComplaintInput> {
     const unknownField = Object.keys(input).find(k => !COMPLAINT_FIELDS.includes(k));
     if (unknownField) return { ok: false, error: `Unexpected field: ${unknownField}` };
 
-    if (typeof input.category !== 'string' || !(input.category in DEPARTMENT_CONFIG)) {
+    if (!isValidCategory(input.category)) {
         return { ok: false, error: 'Invalid category' };
     }
     const description = text(input.description, 'Description', 10, 2000);
     if (!description.ok) return description;
-    const location = text(input.location, 'Location', 3, 300);
+    const location = text(input.location, 'Location', 3, MAX_LOCATION);
     if (!location.ok) return location;
     const rawTitle = typeof input.title === 'string' && input.title.trim() ? input.title : `${input.category} Issue`;
     const title = text(rawTitle, 'Title', 3, 120);
@@ -186,6 +231,31 @@ export function evidencePathFromURL(url: string, opts: { uid: string; bucket: st
     if (segments.length !== 4 || segments[0] !== 'complaints' || segments[1] !== opts.uid) return null;
     if (segments.some(s => !s || s === '.' || s === '..')) return null;
     return objectPath;
+}
+
+export interface TransferInput {
+    department: string;
+    fromDepartment: string;
+    reason: string;
+}
+
+export function validateTransfer(body: Record<string, unknown>): Result<TransferInput> {
+    if (typeof body.department !== 'string' || !DEPARTMENTS.includes(body.department)) return { ok: false, error: 'Choose one of the configured departments' };
+    // The department the caller saw, so a transfer based on a stale view is refused
+    if (typeof body.fromDepartment !== 'string' || !body.fromDepartment) return { ok: false, error: 'fromDepartment is required' };
+    const reason = text(body.reason, 'Reason', 5, 200);
+    if (!reason.ok) return reason;
+    return { ok: true, value: { department: body.department, fromDepartment: body.fromDepartment, reason: reason.value } };
+}
+
+/** Returns [HTTP status, message], or null when the transfer is allowed. */
+export function checkTransfer(actor: Actor, c: ComplaintScope, input: TransferInput): [number, string] | null {
+    if (actor.role !== 'admin') return [403, 'Only an authority can transfer complaints'];
+    if (c.status === 'resolved' || c.status === 'closed') return [409, 'Completed complaints cannot be transferred'];
+    const current = complaintDepartment(c);
+    if (input.fromDepartment !== current) return [409, `This complaint is now handled by ${current ?? 'no department'}. Refresh and try again.`];
+    if (input.department === current) return [400, `This complaint is already handled by ${current}`];
+    return null;
 }
 
 export function validateTicket(body: Record<string, unknown>): Result<{ reason: string; message: string }> {

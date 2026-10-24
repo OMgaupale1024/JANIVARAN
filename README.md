@@ -8,8 +8,9 @@
 
 ### 👤 For Citizens
 -   **Easy Complaint Filing**: Intuitive form with photo evidence upload (JPG/PNG/WebP, up to 3 photos × 5MB).
--   **Real-time Tracking**: Visual timeline of complaint progress (Pending → Under Review → In Progress → Resolved). Anyone with a tracking ID can see a redacted status view at `/track`.
--   **SLA Monitoring**: See transparent deadlines. If a complaint is overdue, it's visually flagged.
+-   **Real-time Tracking**: Visual timeline of complaint progress (Pending → Under Review → In Progress → Resolved). Anyone with a tracking ID can see a redacted status view at `/track` (category, department, status, priority and timeline only: no title, description, location or identity).
+-   **Safe Retries**: If a submission times out, pressing Submit again returns the original complaint instead of creating a duplicate.
+-   **SLA Monitoring**: See transparent deadlines. If a complaint is overdue, it's visually flagged (there is no automatic escalation; citizens can use **Raise Issue** to record a reason and raise the priority to High).
 -   **AI Support Chat**: 24/7 AI assistant to guide you through the process.
 -   **Instant Feedback**: "Rate Service" option upon resolution to ensure accountability.
 -   **Control**: Withdraw a complaint while it is still Pending or Under Review (it is closed, not erased, so the audit trail survives).
@@ -21,7 +22,7 @@
 -   **Role-Based Access** (enforced server-side and in Firestore rules):
     -   *Officials*: See and work only complaints routed to their department (mark Under Review / In Progress).
     -   *Authority* (admin): All departments; exclusive rights to **Resolve/Close**, change **Priority**, **Assign**, and permanently **Delete** complaints.
--   **Smart Notifications**: Automated emails with timestamps for every status change.
+-   **Email Notifications**: Emails for submissions and status changes are sent after the response, so a slow mail server never delays a save. Delivery is best effort: the API reports `queued` or `skipped` (never `sent`) and the server logs the outcome.
 
 ### 🤖 Tech Stack
 -   **Frontend**: Next.js 16, React 19, Tailwind CSS (Noble Dark/Forest Theme).
@@ -64,7 +65,8 @@
     npx firebase-tools@15.34.0 deploy --only firestore:rules,firestore:indexes,storage --project <your-project-id>
     ```
 
-5.  **Create staff accounts**: sign up normally, then in the Firebase console set `users/{uid}.role` to `official` (plus `department`, e.g. `Water Department`) or `admin`. Roles can never be set from the app.
+5.  **Create staff accounts**: the person signs up normally, then a Firebase console operator sets `users/{uid}.role` to `official` (plus `department`, e.g. `Water Department`) or `admin`. Roles can never be set from the app. Step-by-step, including revoking access: [FIREBASE_SETUP.md, Step 7](FIREBASE_SETUP.md#step-7-grant-and-revoke-authority-or-official-access).
+    For demonstrations, `scripts/provision-demo.mjs` creates three demo accounts; see [DEMO_GUIDE.md](DEMO_GUIDE.md).
 
 6.  **Run**
     ```bash
@@ -79,7 +81,9 @@ npm run lint
 npm run typecheck
 npm test                # SLA / policy / validation unit tests
 npm run test:emulator   # Firestore + Storage rules and API tests on local emulators (demo project, no real data)
+npm run test:e2e        # three-role browser walkthrough (Playwright) on the emulators
 ```
+The emulator and browser tests need Java 21+; the browser tests also need `npx playwright install chromium` once.
 
 ## 🔐 Security Model
 
@@ -87,7 +91,14 @@ npm run test:emulator   # Firestore + Storage rules and API tests on local emula
 -   `firestore.rules` gives browsers read-only, scoped access for live dashboards: citizens their own complaints, officials their department, admins everything. Users can create only a `citizen` profile and can never change `role` or `department`.
 -   `storage.rules` lets citizens upload images (≤5MB, JPG/PNG/WebP) only to `complaints/{their uid}/…`; the server re-checks owner, type and size before attaching evidence.
 -   SLA deadlines are computed once at submission from the category and stored on the complaint; every dashboard reads that stored deadline.
--   **Withdrawal vs deletion**: a citizen may withdraw their own complaint while it is Pending or Under Review (status becomes `closed`, `closedReason: withdrawn-by-citizen`). Only an Authority may permanently delete; an audit record is kept.
+-   **Withdrawal vs deletion**: a citizen may withdraw their own complaint while it is Pending or Under Review (status becomes `closed`, `closedReason: withdrawn-by-citizen`, shown to staff as Withdrawn). Only an Authority may permanently delete; an audit record is kept.
+-   **Idempotent submissions**: `POST /api/complaints` accepts an `Idempotency-Key` header. The key is scoped to the signed-in user and stored with the complaint in the same transaction, so a retry returns the original complaint and reusing a key with different details is refused (`409`).
+-   **Assignment** is limited to officials of the complaint's own department, because access follows the department.
+
+### Known limitations
+-   Tracking IDs are six digits and `/api/track` has no rate limit, so statuses can be enumerated. Only non-identifying fields are returned; add a rate-limit rule (e.g. Vercel Firewall on `/api/track`) before wider use.
+-   Emails are not retried if delivery fails; the failure is logged.
+-   Authority contacts shown by **Call Authority** are demo placeholders, not real officials.
 
 ## 📸 Screenshots
 

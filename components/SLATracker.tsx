@@ -56,10 +56,8 @@ export default function SLATracker({ complaint }: SLATrackerProps) {
         }
     };
 
-    const getProgressPercentage = () => {
-        const completedStages = stages.filter(s => s.completed).length;
-        return (completedStages / stages.length) * 100;
-    };
+    // Which stage the complaint has reached; a status says nothing about how much of the repair is done
+    const completedStages = stages.filter(s => s.completed).length;
 
     const formatTimestamp = (timestamp: unknown) => {
         const ms = toMillis(timestamp);
@@ -93,13 +91,13 @@ export default function SLATracker({ complaint }: SLATrackerProps) {
             {/* Progress Bar */}
             <div className="mb-8">
                 <div className="flex items-center justify-between mb-2">
-                    <span className="text-sm font-medium text-gray-700">Overall Progress</span>
-                    <span className="text-sm font-bold text-gray-900">{Math.round(getProgressPercentage())}%</span>
+                    <span className="text-sm font-medium text-gray-700">Stage reached</span>
+                    <span className="text-sm font-bold text-gray-900">{completedStages} of {stages.length}</span>
                 </div>
                 <div className="w-full bg-gray-200 rounded-full h-3">
                     <div
                         className="bg-gradient-to-r from-green-500 to-green-600 h-3 rounded-full transition-all duration-500"
-                        style={{ width: `${getProgressPercentage()}%` }}
+                        style={{ width: `${(completedStages / stages.length) * 100}%` }}
                     ></div>
                 </div>
             </div>
@@ -160,6 +158,21 @@ export default function SLATracker({ complaint }: SLATrackerProps) {
                     );
                 })}
             </div>
+
+            {/* Department transfers (e.g. filed under the wrong category); same complaint, same deadline */}
+            {complaint.transfers?.length ? (
+                <div className="mt-6">
+                    <h4 className="font-semibold text-gray-900 mb-2">Department changes</h4>
+                    <ul className="space-y-2 text-sm text-gray-600">
+                        {complaint.transfers.map(t => (
+                            <li key={String(toMillis(t.at))}>
+                                <span suppressHydrationWarning>{formatTimestamp(t.at)}</span>: transferred from{' '}
+                                <strong>{t.from ?? 'no department'}</strong> to <strong>{t.to}</strong>. Reason: {t.reason}
+                            </li>
+                        ))}
+                    </ul>
+                </div>
+            ) : null}
 
             {/* SLA Information */}
             <div className="mt-8 pt-6 border-t border-gray-200">

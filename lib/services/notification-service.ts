@@ -1,26 +1,35 @@
+import { after } from 'next/server';
 import { Complaint, ComplaintStatus } from '@/types/backend';
 import nodemailer from 'nodemailer';
 
 // Email interface
-interface EmailMessage {
+export interface EmailMessage {
   to: string;
   subject: string;
   html: string;
 }
 
-// 'skipped' = SMTP not configured; callers report this instead of claiming delivery
+// Outcome of one delivery attempt, recorded in logs (and on the user for the welcome email)
 export type DeliveryStatus = 'sent' | 'skipped' | 'failed';
 
-// Create transporter
-const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST || 'smtp.gmail.com',
-  port: parseInt(process.env.SMTP_PORT || '587'),
-  secure: false, // true for 465, false for other ports
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS,
-  },
-});
+// What an API response can honestly say: 'queued' = will be attempted after the response
+// (best effort), 'skipped' = no email will be sent. Never 'sent': delivery happens later.
+export type NotificationStatus = 'queued' | 'skipped';
+
+// Bound every SMTP phase and the whole send so a slow server cannot pin a function
+const SMTP_TIMEOUTS = { dnsTimeout: 5_000, connectionTimeout: 10_000, greetingTimeout: 10_000, socketTimeout: 15_000 };
+const SEND_DEADLINE_MS = 30_000;
+
+// Reserved names (RFC 2606/6761), e.g. the demo accounts, can never receive mail
+const UNDELIVERABLE = /@(?:.+\.)?(?:test|example|invalid|localhost)$|@example\.(?:com|net|org)$/i;
+
+// Where a message would go, or null when no email should be attempted
+function recipient(to: string): string | null {
+  if (!process.env.SMTP_USER || !process.env.SMTP_PASS) return null;
+  // EMAIL_OVERRIDE_TO routes every message to a test inbox (never real citizens)
+  const target = process.env.EMAIL_OVERRIDE_TO || to;
+  return target && !UNDELIVERABLE.test(target) ? target : null;
+}
 
 // Escape user-supplied text before interpolating it into email HTML
 function esc(value: unknown): string {
@@ -29,27 +38,64 @@ function esc(value: unknown): string {
 
 const ref = (complaint: Complaint) => esc(complaint.trackingId || complaint.id);
 
-// Helper to send email
-async function sendEmail(email: EmailMessage): Promise<DeliveryStatus> {
-  if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
-    console.warn('⚠️ [EMAIL] SMTP credentials missing. Not sent:', email.subject);
+// Send one email now; never throws
+export async function deliverEmail(email: EmailMessage): Promise<DeliveryStatus> {
+  const to = recipient(email.to);
+  if (!to) {
+    console.warn('⚠️ [EMAIL] Not sent (SMTP not configured or undeliverable address):', email.subject);
     return 'skipped';
   }
 
+  // Created per send so it always reflects the current configuration
+  const transporter = nodemailer.createTransport({
+    host: process.env.SMTP_HOST || 'smtp.gmail.com',
+    port: parseInt(process.env.SMTP_PORT || '587'),
+    secure: false, // true for 465, false for other ports
+    auth: {
+      user: process.env.SMTP_USER,
+      pass: process.env.SMTP_PASS,
+    },
+    ...SMTP_TIMEOUTS,
+  });
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const info = await transporter.sendMail({
-      from: `"JanNivaran" <${process.env.SMTP_USER}>`, // sender address
-      // EMAIL_OVERRIDE_TO routes every message to a test inbox (never real citizens)
-      to: process.env.EMAIL_OVERRIDE_TO || email.to,
-      subject: email.subject,
-      html: email.html,
-    });
+    const info = await Promise.race([
+      transporter.sendMail({
+        from: `"JanNivaran" <${process.env.SMTP_USER}>`, // sender address
+        to,
+        subject: email.subject,
+        html: email.html,
+      }),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(Object.assign(new Error('SMTP send timed out'), { code: 'ETIMEDOUT' })), SEND_DEADLINE_MS);
+      }),
+    ]);
     console.log(`📧 [EMAIL SENT] MessageId: ${info.messageId}`);
     return 'sent';
   } catch (error) {
-    console.error('❌ [EMAIL FAILED]', error);
+    // Codes only: SMTP errors can echo addresses and server responses
+    const { code, responseCode, command } = error as { code?: string; responseCode?: number; command?: string };
+    console.error('❌ [EMAIL FAILED]', { code, responseCode, command, subject: email.subject });
     return 'failed';
+  } finally {
+    clearTimeout(timer);
   }
+}
+
+/**
+ * Deliver an email after the response has been sent (Next.js after(), which
+ * Vercel keeps alive via waitUntil). Best effort: the outcome is logged and
+ * passed to onResult, and the caller can only report 'queued' or 'skipped'.
+ */
+export function queueEmail(email: EmailMessage, onResult?: (status: DeliveryStatus) => Promise<unknown>): NotificationStatus {
+  if (!recipient(email.to)) return 'skipped';
+  after(async () => {
+    const status = await deliverEmail(email);
+    await onResult?.(status);
+    return status;
+  });
+  return 'queued';
 }
 
 
@@ -113,18 +159,10 @@ function getStatusBadge(status: ComplaintStatus | string): string {
   return badges[status] || `<span class="status-badge">${esc(status)}</span>`;
 }
 
-// Format time remaining
-function formatTimeRemaining(hours: number): string {
-  if (hours < 0) return 'Overdue';
-  if (hours < 1) return `${Math.round(hours * 60)} minutes`;
-  if (hours < 24) return `${Math.round(hours)} hours`;
-  return `${Math.round(hours / 24)} days`;
-}
-
 // 0. Welcome Email
-export async function sendWelcomeEmail(
+export function welcomeEmail(
   user: { displayName: string; email: string }
-): Promise<DeliveryStatus> {
+): EmailMessage {
   const content = `
     <div class="content">
       <h2 style="color: #2d5a3d; margin-top: 0;">👋 Welcome to JanNivaran!</h2>
@@ -146,20 +184,18 @@ export async function sendWelcomeEmail(
     </div>
   `;
 
-  const email: EmailMessage = {
+  return {
     to: user.email,
     subject: `Welcome to JanNivaran - Registration Successful`,
     html: createEmailTemplate(content),
   };
-
-  return sendEmail(email);
 }
 
 // 1. Complaint Submitted Email
-export async function sendComplaintSubmittedEmail(
+export function complaintSubmittedEmail(
   complaint: Complaint,
   userEmail: string
-): Promise<DeliveryStatus> {
+): EmailMessage {
   const content = `
     <div class="content">
       <h2 style="color: #2d5a3d; margin-top: 0;">✅ Your Complaint Has Been Submitted</h2>
@@ -193,22 +229,20 @@ export async function sendComplaintSubmittedEmail(
     </div>
   `;
 
-  const email: EmailMessage = {
+  return {
     to: userEmail,
     subject: `Complaint #${complaint.trackingId || complaint.id} - Successfully Submitted`,
     html: createEmailTemplate(content),
   };
-
-  return sendEmail(email);
 }
 
 // 2. Status Change Email
-export async function sendStatusChangeEmail(
+export function statusChangeEmail(
   complaint: Complaint,
   userEmail: string,
   oldStatus: ComplaintStatus,
   newStatus: ComplaintStatus
-): Promise<DeliveryStatus> {
+): EmailMessage {
   const content = `
     <div class="content">
       <h2 style="color: #2d5a3d; margin-top: 0;">📊 Complaint Status Updated</h2>
@@ -260,119 +294,19 @@ export async function sendStatusChangeEmail(
     </div>
   `;
 
-  const email: EmailMessage = {
+  return {
     to: userEmail,
     subject: `Complaint #${complaint.trackingId || complaint.id} - Status Updated to ${newStatus}`,
     html: createEmailTemplate(content),
   };
-
-  return sendEmail(email);
 }
 
-// 3. SLA Warning Email
-export async function sendSLAWarningEmail(
-  complaint: Complaint,
-  userEmail: string,
-  remainingHours: number
-): Promise<DeliveryStatus> {
-  const content = `
-    <div class="content">
-      <h2 style="color: #f59e0b; margin-top: 0;">⚠️ SLA Deadline Approaching</h2>
-      <p>Your complaint is nearing its Service Level Agreement (SLA) deadline.</p>
-      
-      <div class="warning-box">
-        <div class="info-row">
-          <span class="info-label">Complaint ID:</span>
-          <span class="info-value"><strong>${ref(complaint)}</strong></span>
-        </div>
-        <div class="info-row">
-          <span class="info-label">Time Remaining:</span>
-          <span class="info-value"><strong>${formatTimeRemaining(remainingHours)}</strong></span>
-        </div>
-        <div class="info-row">
-          <span class="info-label">Current Status:</span>
-          <span class="info-value">${getStatusBadge(complaint.status)}</span>
-        </div>
-        <div class="info-row">
-          <span class="info-label">Department:</span>
-          <span class="info-value">${esc(complaint.assignedDepartment || 'Not assigned')}</span>
-        </div>
-      </div>
-
-      <p><strong>What This Means:</strong></p>
-      <p>The assigned department is aware of the deadline and is working to resolve your complaint promptly. If the deadline passes without resolution, your complaint will be automatically escalated to higher authorities.</p>
-      
-      <p style="margin-top: 24px;">
-        <a href="${process.env.NEXT_PUBLIC_APP_URL}/citizen/dashboard" class="button">Monitor Progress</a>
-      </p>
-    </div>
-  `;
-
-  const email: EmailMessage = {
-    to: userEmail,
-    subject: `⚠️ Complaint #${complaint.trackingId || complaint.id} - SLA Deadline Approaching`,
-    html: createEmailTemplate(content),
-  };
-
-  return sendEmail(email);
-}
-
-// 4. SLA Breach Email
-export async function sendSLABreachEmail(
+// 3. Complaint Routed Email (department comes from the stored complaint)
+export function complaintRoutedEmail(
   complaint: Complaint,
   userEmail: string
-): Promise<DeliveryStatus> {
-  const content = `
-    <div class="content">
-      <h2 style="color: #dc2626; margin-top: 0;">🚨 SLA Deadline Breached - Escalation Triggered</h2>
-      <p>The Service Level Agreement deadline for your complaint has been exceeded.</p>
-      
-      <div class="danger-box">
-        <div class="info-row">
-          <span class="info-label">Complaint ID:</span>
-          <span class="info-value"><strong>${ref(complaint)}</strong></span>
-        </div>
-        <div class="info-row">
-          <span class="info-label">Status:</span>
-          <span class="info-value">${getStatusBadge('escalated')}</span>
-        </div>
-        <div class="info-row">
-          <span class="info-label">Original Department:</span>
-          <span class="info-value">${esc(complaint.assignedDepartment || 'Not assigned')}</span>
-        </div>
-      </div>
-
-      <h3>Automatic Escalation Initiated</h3>
-      <p>Your complaint has been automatically escalated to higher authorities for immediate attention. You will receive priority handling from this point forward.</p>
-
-      <p><strong>Next Steps:</strong></p>
-      <ul>
-        <li>Senior officials have been notified</li>
-        <li>Your complaint is now under priority review</li>
-        <li>You will receive updates as actions are taken</li>
-      </ul>
-      
-      <p style="margin-top: 24px;">
-        <a href="${process.env.NEXT_PUBLIC_APP_URL}/citizen/dashboard" class="button">View Escalation Details</a>
-      </p>
-    </div>
-  `;
-
-  const email: EmailMessage = {
-    to: userEmail,
-    subject: `🚨 Complaint #${complaint.trackingId || complaint.id} - Escalated Due to SLA Breach`,
-    html: createEmailTemplate(content),
-  };
-
-  return sendEmail(email);
-}
-
-// 5. Complaint Routed Email
-export async function sendComplaintRoutedEmail(
-  complaint: Complaint,
-  userEmail: string,
-  department: string
-): Promise<DeliveryStatus> {
+): EmailMessage {
+  const department = complaint.assignedDepartment || complaint.department;
   const content = `
     <div class="content">
       <h2 style="color: #2d5a3d; margin-top: 0;">🎯 Complaint Routed to Department</h2>
@@ -405,11 +339,9 @@ export async function sendComplaintRoutedEmail(
     </div>
   `;
 
-  const email: EmailMessage = {
+  return {
     to: userEmail,
     subject: `Complaint #${complaint.trackingId || complaint.id} - Assigned to ${department}`,
     html: createEmailTemplate(content),
   };
-
-  return sendEmail(email);
 }

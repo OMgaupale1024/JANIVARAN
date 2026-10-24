@@ -14,6 +14,7 @@ import {
     CheckCircle2,
     AlertCircle,
     TrendingUp,
+    Search,
     Plus,
     Home,
     Trash2
@@ -23,21 +24,27 @@ import { listenToComplaintsByCitizen } from '@/lib/services/complaint-service';
 import { Complaint } from '@/types/backend';
 import { isComplaintStalled, getStalledStatusLabel, getStalledComplaints } from '@/lib/services/stalled-detection-service';
 import { calculateSLA } from '@/lib/services/sla-service';
-import { WITHDRAWABLE_STATUSES } from '@/lib/complaint-policy';
+import { CITIZEN_STATUSES, CitizenStatus, WITHDRAWABLE_STATUSES, citizenStatus } from '@/lib/complaint-policy';
 import { apiFetch } from '@/lib/api-client';
 import StalledComplaintBadge from '@/components/StalledComplaintBadge';
 import InterventionActions from '@/components/InterventionActions';
 
 import SLATracker from '@/components/SLATracker';
+import ComplaintStatusChart from '@/components/ComplaintStatusChart';
+
+const STATUS_LABEL = Object.fromEntries(CITIZEN_STATUSES.map(s => [s.key, s.label])) as Record<CitizenStatus, string>;
+const handlingDepartment = (c: Complaint) => c.assignedDepartment ?? c.department;
 
 export default function CitizenDashboard() {
     const router = useRouter();
     const { user, loading: authLoading, authError, signOut } = useAuth();
     const [sidebarOpen, setSidebarOpen] = useState(false);
-    const [complaints, setComplaints] = useState<Complaint[]>([]);
-    const [loaded, setLoaded] = useState(false);
-    const [listenError, setListenError] = useState<string | null>(null);
-    const loading = !loaded && !listenError;
+    // Tagged with the account it belongs to, so another account's data is never shown after a switch
+    const [feed, setFeed] = useState<{ uid: string; complaints?: Complaint[]; error?: string } | null>(null);
+    const current = feed && feed.uid === user?.uid ? feed : null;
+    const complaints = current?.complaints ?? [];
+    const listenError = current?.error ?? null;
+    const loading = !current;
     const [activeTab, setActiveTab] = useState<'overview' | 'complaints' | 'settings'>('overview');
     const [expandedComplaintId, setExpandedComplaintId] = useState<string | null>(null);
 
@@ -56,14 +63,11 @@ export default function CitizenDashboard() {
     useEffect(() => {
         if (!user) return;
 
+        const uid = user.uid;
         const unsubscribe = listenToComplaintsByCitizen(
-            user.uid,
-            (data) => {
-                setComplaints(data);
-                setLoaded(true);
-                setListenError(null);
-            },
-            () => setListenError('Could not load your complaints. Please refresh the page.')
+            uid,
+            (data) => setFeed({ uid, complaints: data }),
+            () => setFeed({ uid, error: 'Could not load your complaints. Please refresh the page.' })
         );
 
         // Cleanup listener on unmount
@@ -85,15 +89,15 @@ export default function CitizenDashboard() {
         router.push('/');
     };
 
+    // One status per complaint, shared by the cards, the chart and the list badges
+    const counts = Object.fromEntries(CITIZEN_STATUSES.map(s => [s.key, 0])) as Record<CitizenStatus, number>;
+    complaints.forEach(c => counts[citizenStatus(c)]++);
     const stats = {
         total: complaints.length,
-        pending: complaints.filter(c => c.status === 'pending').length,
-        inProgress: complaints.filter(c => c.status === 'in-progress').length,
-        resolved: complaints.filter(c => c.status === 'resolved').length,
         stalled: getStalledComplaints(complaints).length,
     };
 
-    const getStatusColor = (status: string) => {
+    const getStatusColor = (status: CitizenStatus) => {
         switch (status) {
             case 'pending': return 'bg-yellow-100 text-yellow-800 border-yellow-200';
             case 'under-review': return 'bg-purple-100 text-purple-800 border-purple-200';
@@ -103,6 +107,17 @@ export default function CitizenDashboard() {
             default: return 'bg-gray-100 text-gray-800 border-gray-200';
         }
     };
+    const statusBadge = (c: Complaint) => {
+        const status = citizenStatus(c);
+        return (
+            <span className={`px-3 py-1 rounded-full text-xs font-semibold border ${getStatusColor(status)}`}>
+                {STATUS_LABEL[status].toUpperCase()}
+            </span>
+        );
+    };
+    const loadFailed = (
+        <p className="text-red-700 text-center py-8">Your complaints could not be loaded, so nothing is shown here. Please refresh the page.</p>
+    );
 
     const getSLAColor = (status: string) => {
         switch (status) {
@@ -211,7 +226,7 @@ export default function CitizenDashboard() {
                     {/* Overview Tab */}
                     {activeTab === 'overview' && (
                         <div className="space-y-6">
-                            <div className="flex items-center justify-between">
+                            <div className="flex flex-wrap items-center justify-between gap-4">
                                 <div>
                                     <h2 className="text-3xl font-bold text-gray-900">Dashboard</h2>
                                     <p className="text-gray-500 mt-1">Welcome back, {user.displayName}!</p>
@@ -225,61 +240,36 @@ export default function CitizenDashboard() {
                                 </Link>
                             </div>
 
-                            {/* Stats Cards */}
-                            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-                                <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-100">
-                                    <div className="flex items-center justify-between">
-                                        <div>
-                                            <p className="text-sm text-gray-500 font-medium">Total Complaints</p>
-                                            <p className="text-3xl font-bold text-gray-900 mt-2">{stats.total}</p>
-                                        </div>
-                                        <div className="w-12 h-12 bg-gray-100 rounded-xl flex items-center justify-center">
-                                            <FileText className="text-gray-600" size={24} />
-                                        </div>
+                            {/* Stats Cards + chart: shown only once this account's complaints have loaded */}
+                            {current?.complaints && (
+                                <>
+                                    <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
+                                        {([
+                                            ['Total Complaints', stats.total, 'text-gray-900', FileText, 'bg-gray-100 text-gray-600'],
+                                            ['Pending', counts.pending, 'text-yellow-600', Clock, 'bg-yellow-100 text-yellow-600'],
+                                            ['Under Review', counts['under-review'], 'text-purple-600', Search, 'bg-purple-100 text-purple-600'],
+                                            ['In Progress', counts['in-progress'], 'text-blue-600', TrendingUp, 'bg-blue-100 text-blue-600'],
+                                            ['Resolved', counts.resolved, 'text-green-600', CheckCircle2, 'bg-green-100 text-green-600'],
+                                        ] as const).map(([label, value, color, Icon, iconBox]) => (
+                                            <div key={label} className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 flex items-center justify-between gap-2">
+                                                <div>
+                                                    <p className="text-sm text-gray-500 font-medium">{label}</p>
+                                                    <p className={`text-3xl font-bold mt-2 ${color}`}>{value}</p>
+                                                </div>
+                                                <div className={`hidden sm:flex w-12 h-12 rounded-xl items-center justify-center ${iconBox}`}>
+                                                    <Icon size={24} />
+                                                </div>
+                                            </div>
+                                        ))}
                                     </div>
-                                </div>
-
-                                <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-100">
-                                    <div className="flex items-center justify-between">
-                                        <div>
-                                            <p className="text-sm text-gray-500 font-medium">Pending</p>
-                                            <p className="text-3xl font-bold text-yellow-600 mt-2">{stats.pending}</p>
-                                        </div>
-                                        <div className="w-12 h-12 bg-yellow-100 rounded-xl flex items-center justify-center">
-                                            <Clock className="text-yellow-600" size={24} />
-                                        </div>
-                                    </div>
-                                </div>
-
-                                <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-100">
-                                    <div className="flex items-center justify-between">
-                                        <div>
-                                            <p className="text-sm text-gray-500 font-medium">In Progress</p>
-                                            <p className="text-3xl font-bold text-blue-600 mt-2">{stats.inProgress}</p>
-                                        </div>
-                                        <div className="w-12 h-12 bg-blue-100 rounded-xl flex items-center justify-center">
-                                            <TrendingUp className="text-blue-600" size={24} />
-                                        </div>
-                                    </div>
-                                </div>
-
-                                <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-100">
-                                    <div className="flex items-center justify-between">
-                                        <div>
-                                            <p className="text-sm text-gray-500 font-medium">Resolved</p>
-                                            <p className="text-3xl font-bold text-green-600 mt-2">{stats.resolved}</p>
-                                        </div>
-                                        <div className="w-12 h-12 bg-green-100 rounded-xl flex items-center justify-center">
-                                            <CheckCircle2 className="text-green-600" size={24} />
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
+                                    {stats.total > 0 && <ComplaintStatusChart counts={counts} total={stats.total} />}
+                                </>
+                            )}
 
                             {/* Recent Complaints */}
                             <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6">
                                 <h3 className="text-xl font-bold text-gray-900 mb-4">Recent Complaints</h3>
-                                {loading ? (
+                                {listenError ? loadFailed : loading ? (
                                     <p className="text-gray-500 text-center py-8">Loading complaints...</p>
                                 ) : complaints.length === 0 ? (
                                     <div className="text-center py-12">
@@ -306,15 +296,13 @@ export default function CitizenDashboard() {
                                                             <span className="font-mono text-sm font-semibold text-noble-dark">
                                                                 {complaint.trackingId}
                                                             </span>
-                                                            <span className={`px-3 py-1 rounded-full text-xs font-semibold border ${getStatusColor(complaint.status)}`}>
-                                                                {complaint.status.replace('-', ' ').toUpperCase()}
-                                                            </span>
+                                                            {statusBadge(complaint)}
                                                             {isComplaintStalled(complaint) && (
                                                                 <StalledComplaintBadge status={getStalledStatusLabel(complaint)!} />
                                                             )}
                                                         </div>
                                                         <h4 className="font-semibold text-gray-900 mb-1">{complaint.title}</h4>
-                                                        <p className="text-sm text-gray-500 mb-2">{complaint.category} • {complaint.department}</p>
+                                                        <p className="text-sm text-gray-500 mb-2">Filed as {complaint.category} • Handled by {handlingDepartment(complaint)}</p>
                                                         {(() => {
                                                             const sla = calculateSLA(complaint);
                                                             return (
@@ -355,7 +343,7 @@ export default function CitizenDashboard() {
                     {/* Complaints Tab */}
                     {activeTab === 'complaints' && (
                         <div className="space-y-6">
-                            <div className="flex items-center justify-between">
+                            <div className="flex flex-wrap items-center justify-between gap-4">
                                 <h2 className="text-3xl font-bold text-gray-900">My Complaints</h2>
                                 <Link
                                     href="/file-complaint"
@@ -367,7 +355,7 @@ export default function CitizenDashboard() {
                             </div>
 
                             <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6">
-                                {loading ? (
+                                {listenError ? loadFailed : loading ? (
                                     <p className="text-gray-500 text-center py-8">Loading complaints...</p>
                                 ) : complaints.length === 0 ? (
                                     <div className="text-center py-12">
@@ -388,9 +376,7 @@ export default function CitizenDashboard() {
                                                             <span className="font-mono text-sm font-semibold text-noble-dark">
                                                                 {complaint.trackingId}
                                                             </span>
-                                                            <span className={`px-3 py-1 rounded-full text-xs font-semibold border ${getStatusColor(complaint.status)}`}>
-                                                                {complaint.status.replace('-', ' ').toUpperCase()}
-                                                            </span>
+                                                            {statusBadge(complaint)}
                                                             <span className={`px-3 py-1 rounded-full text-xs font-semibold ${complaint.priority === 'critical' ? 'bg-red-100 text-red-800' :
                                                                 complaint.priority === 'high' ? 'bg-orange-100 text-orange-800' :
                                                                     complaint.priority === 'medium' ? 'bg-yellow-100 text-yellow-800' :
@@ -404,10 +390,10 @@ export default function CitizenDashboard() {
                                                         </div>
                                                         <h4 className="font-bold text-gray-900 text-lg mb-1">{complaint.title}</h4>
                                                         <p className="text-sm text-gray-600 mb-2">{complaint.description}</p>
-                                                        <div className="flex items-center gap-4 text-sm text-gray-500">
-                                                            <span>{complaint.category}</span>
+                                                        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-gray-500">
+                                                            <span>Filed as {complaint.category}</span>
                                                             <span>•</span>
-                                                            <span>{complaint.department}</span>
+                                                            <span>Handled by {handlingDepartment(complaint)}</span>
                                                             <span>•</span>
                                                             <span suppressHydrationWarning>
                                                                 {complaint.createdAt?.toDate?.().toLocaleDateString()}

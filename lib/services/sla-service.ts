@@ -1,4 +1,4 @@
-import { DEPARTMENT_CONFIG } from '../engines/classification-engine';
+import { DEPARTMENT_CONFIG, isValidCategory } from '../engines/classification-engine';
 
 /**
  * Single source of truth for SLA calculations.
@@ -59,8 +59,7 @@ export function isClosedStatus(status?: string): boolean {
 }
 
 export function slaHoursForCategory(category?: string): number {
-    const config = DEPARTMENT_CONFIG[category as keyof typeof DEPARTMENT_CONFIG] ?? DEPARTMENT_CONFIG.Other;
-    return config.slaHours;
+    return (isValidCategory(category) ? DEPARTMENT_CONFIG[category] : DEPARTMENT_CONFIG.Other).slaHours;
 }
 
 export function getAssignedHours(c: SLAInput): number {

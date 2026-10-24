@@ -125,6 +125,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                 return;
             }
 
+            // Until this user's profile is known, pages must not treat them as signed out
+            setLoading(true);
             try {
                 let userData = await fetchUserData(fbUser.uid);
                 if (!userData) {

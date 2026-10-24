@@ -9,7 +9,8 @@
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
     "test": "node --test tests/unit.test.cjs",
-    "test:emulator": "npx -y firebase-tools@15.34.0 emulators:exec --project demo-jannivaran --only auth,firestore,storage \"node --test --test-concurrency=1 tests/emulator.test.cjs\""
+    "test:emulator": "npx -y firebase-tools@15.34.0 emulators:exec --project demo-jannivaran --only auth,firestore,storage \"node --test --test-concurrency=1 tests/emulator.test.cjs\"",
+    "test:e2e": "npx -y firebase-tools@15.34.0 emulators:exec --project demo-jannivaran --only auth,firestore,storage \"playwright test\""
   },
   "dependencies": {
     "@types/d3-scale": "^4.0.9",
@@ -30,6 +31,7 @@
     "tailwind-merge": "^3.4.0"
   },
   "devDependencies": {
+    "@playwright/test": "1.64.0",
     "@types/node": "^20",
     "@types/nodemailer": "^7.0.9",
     "@types/react": "^19",

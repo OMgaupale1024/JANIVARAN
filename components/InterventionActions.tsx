@@ -105,8 +105,8 @@ export default function InterventionActions({
             </div>
 
             <p className="text-xs text-amber-600 mt-1">
-                💡 <strong>Call Authority:</strong> Get contact details to speak directly with the responsible official.
-                <strong className="ml-2">Raise Issue:</strong> Submit an escalation request to senior authorities.
+                💡 <strong>Call Authority:</strong> Shows the department contact (demo data in this version).
+                <strong className="ml-2">Raise Issue:</strong> Records why this needs attention and raises its priority to High.
             </p>
 
             {/* Call Authority Modal */}
@@ -120,7 +120,7 @@ export default function InterventionActions({
                                 </div>
                                 <div>
                                     <h3 className="text-lg font-bold text-slate-900">Authority Contact</h3>
-                                    <p className="text-sm text-slate-600">{contact.level}</p>
+                                    <p className="text-sm text-slate-600">{contact.level} · Demo data</p>
                                 </div>
                             </div>
                             <button
@@ -147,27 +147,17 @@ export default function InterventionActions({
                             </div>
                             <div className="p-3 bg-slate-50 rounded-lg">
                                 <p className="text-xs text-slate-600 mb-1">Phone</p>
-                                <a
-                                    href={`tel:${contact.phone}`}
-                                    className="font-semibold text-forest-600 hover:text-forest-700"
-                                >
-                                    {contact.phone}
-                                </a>
+                                <p className="font-semibold text-slate-900">{contact.phone}</p>
                             </div>
                             <div className="p-3 bg-slate-50 rounded-lg">
                                 <p className="text-xs text-slate-600 mb-1">Email</p>
-                                <a
-                                    href={`mailto:${contact.email}`}
-                                    className="font-semibold text-forest-600 hover:text-forest-700 break-all"
-                                >
-                                    {contact.email}
-                                </a>
+                                <p className="font-semibold text-slate-900 break-all">{contact.email}</p>
                             </div>
                         </div>
 
                         <div className="mt-6 p-3 bg-blue-50 border border-blue-200 rounded-lg">
                             <p className="text-xs text-blue-800">
-                                📞 This action has been logged. You can now contact the authority directly using the information above.
+                                📞 Your request was logged on this complaint. These are demo placeholder details, not a real official: do not call or email them.
                             </p>
                         </div>
                     </div>
@@ -185,7 +175,7 @@ export default function InterventionActions({
                                 </div>
                                 <div>
                                     <h3 className="text-lg font-bold text-slate-900">Raise Escalation</h3>
-                                    <p className="text-sm text-slate-600">Submit to senior authorities</p>
+                                    <p className="text-sm text-slate-600">Ask staff to prioritise this complaint</p>
                                 </div>
                             </div>
                             <button
@@ -234,7 +224,7 @@ export default function InterventionActions({
 
                             <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg">
                                 <p className="text-xs text-amber-800">
-                                    ⚠️ This will notify senior officials and create an escalation record. Use this action when your complaint genuinely requires higher-level intervention.
+                                    ⚠️ This records your reason on the complaint and raises its priority to High so staff see it first. It does not notify anyone automatically, so use it only when the complaint genuinely needs attention.
                                 </p>
                             </div>
 

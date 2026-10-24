@@ -12,6 +12,8 @@
 
 # testing
 /coverage
+/test-results/
+/playwright-report/
 
 # next.js
 /.next/
@@ -40,6 +42,8 @@ yarn-error.log*
 # credentials
 *service-account*.json
 *serviceAccount*.json
+# demo account passwords written by scripts/provision-demo.mjs
+.demo-credentials*.json
 
 # vercel
 .vercel

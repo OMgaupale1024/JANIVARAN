@@ -20,12 +20,19 @@ Object.assign(process.env, {
 for (const key of ['SMTP_USER', 'SMTP_PASS', 'FIREBASE_CLIENT_EMAIL', 'FIREBASE_PRIVATE_KEY', 'FIREBASE_PROJECT_ID']) delete process.env[key];
 
 const load = require('./load.cjs');
+const nextServer = require('./next-server.cjs');
 const { NextRequest } = require('next/server');
 const { initializeApp, deleteApp } = require('firebase/app');
 const fs = require('firebase/firestore');
 const st = require('firebase/storage');
-const { adminDb, adminBucket } = load('@/lib/firebase-admin');
+const { adminDb, adminBucket, adminAuth } = load('@/lib/firebase-admin');
 const { Timestamp } = require('firebase-admin/firestore');
+const net = require('net');
+const os = require('os');
+const path = require('path');
+const { randomUUID } = require('crypto');
+const { spawnSync } = require('child_process');
+const nodeFs = require('fs');
 
 const routes = {
     complaints: load('@/app/api/complaints/route'),
@@ -64,8 +71,8 @@ async function makeUser(email, role, department) {
     return user;
 }
 
-async function call(handler, { method = 'GET', path = '/', token, body, id } = {}) {
-    const headers = {};
+async function call(handler, { method = 'GET', path = '/', token, body, id, headers: extra = {} } = {}) {
+    const headers = { ...extra };
     if (token) headers.authorization = `Bearer ${token}`;
     if (body !== undefined) headers['content-type'] = 'application/json';
     const req = new NextRequest(`http://localhost${path}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
@@ -104,10 +111,64 @@ async function seedComplaint(fields) {
     return ref.id;
 }
 
-async function uploadEvidence(uid, name = 'photo.jpg', contentType = 'image/jpeg') {
+async function uploadEvidence(uid, name = 'photo.jpg', contentType = 'image/jpeg', bytes = Buffer.from([0xff, 0xd8, 0xff, 0xe0])) {
     const path = `complaints/${uid}/${Math.random().toString(36).slice(2)}/${name}`;
-    await adminBucket().file(path).save(Buffer.from([0xff, 0xd8, 0xff, 0xe0]), { contentType });
+    await adminBucket().file(path).save(bytes, { contentType });
     return `http://${STORAGE}/v0/b/${BUCKET}/o/${encodeURIComponent(path)}?alt=media&token=test`;
+}
+
+const complaintDoc = id => adminDb().collection('complaints').doc(id).get().then(d => d.data());
+
+// A local SMTP endpoint: 'stall' accepts connections and never answers, 'reject' refuses service
+async function fakeSmtp(mode) {
+    const sockets = new Set();
+    let onConnect;
+    const connected = new Promise(resolve => { onConnect = resolve; });
+    const server = net.createServer(socket => {
+        sockets.add(socket);
+        socket.on('error', () => {});
+        socket.on('close', () => sockets.delete(socket));
+        onConnect();
+        if (mode === 'reject') socket.end('554 5.3.2 Service unavailable\r\n');
+    });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    return {
+        port: server.address().port,
+        connected,
+        close: () => new Promise(resolve => { sockets.forEach(s => s.destroy()); server.close(() => resolve()); }),
+    };
+}
+
+// Point the mail code at a local port with credentials set; returns a restore function
+function useSmtp(port) {
+    const keys = ['SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASS', 'EMAIL_OVERRIDE_TO'];
+    const saved = Object.fromEntries(keys.map(k => [k, process.env[k]]));
+    Object.assign(process.env, { SMTP_HOST: '127.0.0.1', SMTP_PORT: String(port), SMTP_USER: 'robot', SMTP_PASS: 'not-a-real-password', EMAIL_OVERRIDE_TO: 'qa-inbox@jannivaran-qa.net' });
+    return () => keys.forEach(k => (saved[k] === undefined ? delete process.env[k] : (process.env[k] = saved[k])));
+}
+
+// Unsigned emulator ID token that expired an hour ago
+function expiredToken(user) {
+    const part = o => Buffer.from(JSON.stringify(o)).toString('base64url');
+    const now = Math.floor(Date.now() / 1000);
+    return `${part({ alg: 'none', typ: 'JWT' })}.${part({
+        iss: `https://securetoken.google.com/${PROJECT}`, aud: PROJECT, sub: user.uid, user_id: user.uid,
+        email: user.email, auth_time: now - 7200, iat: now - 7200, exp: now - 3600,
+    })}.`;
+}
+
+async function signIn(email, password) {
+    const res = await fetch(`http://${AUTH}/identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=fake-api-key`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password, returnSecureToken: true }),
+    });
+    return res.json();
+}
+
+const PROVISION = path.join(__dirname, '..', 'scripts', 'provision-demo.mjs');
+function provision(args, env = process.env) {
+    return spawnSync(process.execPath, [PROVISION, ...args], { env, encoding: 'utf8', timeout: 60_000 });
 }
 
 // ---------- fixtures ----------
@@ -178,6 +239,7 @@ test('rules: signup creates a citizen profile and roles cannot be self-assigned'
 
     await denied(fs.setDoc(ref, { ...base, role: 'admin' }));
     await denied(fs.setDoc(ref, { ...base, role: 'citizen', department: 'Water Department' }));
+    await denied(fs.setDoc(ref, { ...base, role: 'citizen', demo: true }));
     await denied(fs.setDoc(fs.doc(db, 'users', bob.uid), { ...base, uid: bob.uid, role: 'citizen' }));
     await fs.setDoc(ref, { ...base, role: 'citizen' });
 
@@ -315,7 +377,10 @@ test('api: public tracking returns a redacted view', async () => {
     const res = await call(routes.track.GET, { path: `/api/track?trackingId=${trackingId.toLowerCase()}` });
     assert.equal(res.status, 200);
     assert.equal(res.body.data.trackingId, trackingId);
-    for (const key of ['citizenId', 'citizenEmail', 'citizenName', 'description', 'photoURLs', 'citizenTickets']) {
+    assert.equal(res.body.data.status, 'pending');
+    assert.equal(res.body.data.category, 'Water Supply');
+    // Free text (title, location) can hold addresses or names, so it stays private too
+    for (const key of ['citizenId', 'citizenEmail', 'citizenName', 'description', 'photoURLs', 'citizenTickets', 'title', 'location', 'assignedTo']) {
         assert.ok(!(key in res.body.data), `leaked ${key}`);
     }
     assert.equal(typeof res.body.data.createdAt, 'string');
@@ -408,13 +473,36 @@ test('api: citizens withdraw only before work starts; only authorities delete', 
     assert.equal((await adminBucket().file(path).exists())[0], false);
 });
 
-test('api: welcome email goes only to the verified address, once', async () => {
+test('api: welcome email goes only to the verified address, once, and records what really happened', async () => {
     const first = await call(routes.welcome.POST, { method: 'POST', token: bob.token, body: { user: { email: 'victim@example.test' } } });
     assert.equal(first.status, 200);
     assert.equal(first.body.notification, 'skipped'); // no SMTP in tests
-    assert.ok((await adminDb().collection('users').doc(bob.uid).get()).data().welcomeEmailSentAt);
+    const profile = (await adminDb().collection('users').doc(bob.uid).get()).data();
+    assert.ok(profile.welcomeEmailRequestedAt);
+    assert.equal(profile.welcomeEmailStatus, 'skipped');
+    assert.equal(profile.welcomeEmailSentAt, undefined, 'a skipped email must not be recorded as sent');
     const second = await call(routes.welcome.POST, { method: 'POST', token: bob.token });
-    assert.equal(second.body.reason, 'already-sent');
+    assert.equal(second.body.reason, 'already-requested');
+
+    // Accounts welcomed before delivery status existed are not emailed again
+    const legacy = await makeUser('legacy@example.test', 'citizen');
+    await adminDb().collection('users').doc(legacy.uid).update({ welcomeEmailSentAt: Timestamp.now() });
+    assert.equal((await call(routes.welcome.POST, { method: 'POST', token: legacy.token })).body.reason, 'already-requested');
+
+    // With mail configured the email is queued for after the response, then its outcome is stored
+    const smtp = await fakeSmtp('reject');
+    const restore = useSmtp(smtp.port);
+    try {
+        const carol = await makeUser('welcome-smtp@example.test', 'citizen');
+        const queued = await call(routes.welcome.POST, { method: 'POST', token: carol.token });
+        assert.equal(queued.body.notification, 'queued');
+        assert.equal((await adminDb().collection('users').doc(carol.uid).get()).data().welcomeEmailStatus, undefined);
+        await nextServer.runAfterTasks();
+        assert.equal((await adminDb().collection('users').doc(carol.uid).get()).data().welcomeEmailStatus, 'failed');
+    } finally {
+        restore();
+        await smtp.close();
+    }
 });
 
 test('api: simulation is admin-only, test-data-only, and disabled in production', async () => {
@@ -445,4 +533,364 @@ test('api: official without a department is denied, not shown everything', async
     const orphan = await makeUser('orphan@example.test', 'official');
     assert.equal((await call(routes.complaints.GET, { token: orphan.token })).status, 403);
     assert.equal((await call(routes.complaint.GET, { id: aliceComplaint, token: orphan.token })).status, 404);
+});
+
+// ---------- notifications never hold up committed work ----------
+
+const WATER = { category: 'Water Supply', description: 'Leaking valve beside the bus stop', location: 'Ward 3' };
+
+test('api: a stalled mail server does not delay or undo a saved complaint', async () => {
+    const smtp = await fakeSmtp('stall');
+    const restore = useSmtp(smtp.port);
+    try {
+        const started = Date.now();
+        const res = await call(routes.complaints.POST, { method: 'POST', token: alice.token, body: WATER });
+        assert.equal(res.status, 201, JSON.stringify(res.body));
+        assert.ok(Date.now() - started < 3000, `response took ${Date.now() - started}ms`);
+        assert.equal(res.body.notification, 'queued');
+        assert.match(res.body.data.trackingId, /^JAN-\d{6}$/);
+        assert.equal((await complaintDoc(res.body.data.id)).citizenId, alice.uid);
+
+        // The email is only attempted after the response; the server never answers, then disappears
+        const delivery = nextServer.runAfterTasks();
+        await smtp.connected;
+        await smtp.close();
+        assert.deepEqual(await delivery, ['failed']);
+        assert.equal((await complaintDoc(res.body.data.id)).status, 'pending');
+    } finally {
+        restore();
+        await smtp.close();
+    }
+});
+
+test('api: a failing or unreachable mail server does not undo a committed status change or assignment', async () => {
+    const id = await seedComplaint({ citizenId: alice.uid, citizenEmail: alice.email });
+    const smtp = await fakeSmtp('reject');
+    const restore = useSmtp(smtp.port);
+    try {
+        const res = await call(routes.complaint.PATCH, { method: 'PATCH', id, token: waterOfficial.token, body: { action: 'updateStatus', status: 'under-review' } });
+        assert.equal(res.status, 200, JSON.stringify(res.body));
+        assert.equal(res.body.notification, 'queued');
+        assert.equal((await complaintDoc(id)).status, 'under-review');
+        assert.deepEqual(await nextServer.runAfterTasks(), ['failed']);
+
+        await smtp.close(); // nothing listens on the port any more
+        const assigned = await call(routes.complaint.PATCH, { method: 'PATCH', id, token: admin.token, body: { action: 'assign', officialId: waterOfficial.uid } });
+        assert.equal(assigned.status, 200, JSON.stringify(assigned.body));
+        assert.equal(assigned.body.notification, 'queued');
+        assert.deepEqual(await nextServer.runAfterTasks(), ['failed']);
+        const doc = await complaintDoc(id);
+        assert.equal(doc.assignedTo, waterOfficial.uid);
+        assert.equal(doc.status, 'in-progress');
+    } finally {
+        restore();
+        await smtp.close();
+    }
+});
+
+test('api: mail to reserved demo domains is skipped, not attempted', async () => {
+    const smtp = await fakeSmtp('stall');
+    const restore = useSmtp(smtp.port);
+    delete process.env.EMAIL_OVERRIDE_TO;
+    try {
+        const res = await call(routes.complaints.POST, { method: 'POST', token: alice.token, body: WATER });
+        assert.equal(res.status, 201);
+        assert.equal(res.body.notification, 'skipped'); // alice@example.test can never receive mail
+        assert.equal(nextServer.pendingAfterTasks(), 0);
+    } finally {
+        restore();
+        await smtp.close();
+    }
+});
+
+// ---------- idempotent complaint creation ----------
+
+async function complaintsOf(user, description) {
+    const snap = await adminDb().collection('complaints').where('citizenId', '==', user.uid).get();
+    return snap.docs.filter(d => d.data().description === description);
+}
+
+test('api: retrying a submission with the same request ID returns the original complaint', async () => {
+    const dave = await makeUser('dave@example.test', 'citizen');
+    const key = randomUUID();
+    const body = { ...WATER, description: 'No water since morning in Block C' };
+    const first = await call(routes.complaints.POST, { method: 'POST', token: dave.token, body, headers: { 'idempotency-key': key } });
+    assert.equal(first.status, 201, JSON.stringify(first.body));
+    const retry = await call(routes.complaints.POST, { method: 'POST', token: dave.token, body, headers: { 'idempotency-key': key } });
+    assert.equal(retry.status, 200, JSON.stringify(retry.body));
+    assert.equal(retry.body.replayed, true);
+    assert.equal(retry.body.notification, 'skipped');
+    assert.equal(retry.body.data.id, first.body.data.id);
+    assert.equal(retry.body.data.trackingId, first.body.data.trackingId);
+
+    const stored = await complaintsOf(dave, body.description);
+    assert.equal(stored.length, 1);
+    const reservations = await adminDb().collection('trackingIds').where('complaintId', '==', first.body.data.id).get();
+    assert.equal(reservations.size, 1);
+
+    // Same ID with different details is a conflict that names the saved complaint
+    const conflict = await call(routes.complaints.POST, { method: 'POST', token: dave.token, body: { ...body, location: 'Ward 9' }, headers: { 'idempotency-key': key } });
+    assert.equal(conflict.status, 409);
+    assert.equal(conflict.body.trackingId, first.body.data.trackingId);
+
+    // A genuinely new complaint (new ID) with identical text is allowed
+    const repeat = await call(routes.complaints.POST, { method: 'POST', token: dave.token, body, headers: { 'idempotency-key': randomUUID() } });
+    assert.equal(repeat.status, 201);
+    assert.notEqual(repeat.body.data.id, first.body.data.id);
+    assert.equal((await complaintsOf(dave, body.description)).length, 2);
+});
+
+test('api: concurrent retries of one request create exactly one complaint', async () => {
+    const erin = await makeUser('erin@example.test', 'citizen');
+    const key = randomUUID();
+    const body = { ...WATER, description: 'Sewage overflow outside the school gate' };
+    const results = await Promise.all(Array.from({ length: 6 }, () =>
+        call(routes.complaints.POST, { method: 'POST', token: erin.token, body, headers: { 'idempotency-key': key } })));
+    assert.ok(results.every(r => r.status === 201 || r.status === 200), JSON.stringify(results.map(r => [r.status, r.body.error])));
+    assert.equal(results.filter(r => r.status === 201).length, 1);
+    assert.equal(new Set(results.map(r => r.body.data.trackingId)).size, 1);
+    assert.equal((await complaintsOf(erin, body.description)).length, 1);
+});
+
+test('api: request IDs are scoped to the signed-in user and validated', async () => {
+    const key = randomUUID();
+    const body = { ...WATER, description: 'Shared request id across two citizens' };
+    const a = await call(routes.complaints.POST, { method: 'POST', token: alice.token, body, headers: { 'idempotency-key': key } });
+    const b = await call(routes.complaints.POST, { method: 'POST', token: bob.token, body, headers: { 'idempotency-key': key } });
+    assert.equal(a.status, 201);
+    assert.equal(b.status, 201);
+    assert.notEqual(a.body.data.id, b.body.data.id);
+    assert.equal(b.body.data.citizenId, bob.uid);
+
+    for (const bad of ['short', 'has spaces in it but long enough', 'x'.repeat(200)]) {
+        const res = await call(routes.complaints.POST, { method: 'POST', token: alice.token, body, headers: { 'idempotency-key': bad } });
+        assert.equal(res.status, 400, bad);
+    }
+});
+
+// ---------- validation and scoping ----------
+
+test('api: inherited object keys are rejected as categories with 400', async () => {
+    for (const category of ['toString', 'constructor', '__proto__']) {
+        const res = await call(routes.complaints.POST, { method: 'POST', token: alice.token, body: { category, description: 'Pipe burst on main road', location: 'Ward 5' } });
+        assert.equal(res.status, 400, category);
+        assert.equal(res.body.error, 'Invalid category');
+    }
+});
+
+test('api: oversized evidence and expired sessions are rejected', async () => {
+    const big = await uploadEvidence(alice.uid, 'big.jpg', 'image/jpeg', Buffer.alloc(5 * 1024 * 1024 + 1));
+    const res = await call(routes.complaints.POST, { method: 'POST', token: alice.token, body: { ...WATER, photoURLs: [big] } });
+    assert.equal(res.status, 400);
+
+    const expired = await call(routes.complaints.GET, { token: expiredToken(alice) });
+    assert.equal(expired.status, 401);
+    assert.match(expired.body.error, /expired session/i);
+});
+
+test('api: complaints are assigned only to officials of their own department', async () => {
+    const id = await seedComplaint({ citizenId: alice.uid, citizenEmail: alice.email }); // Water Department
+    const assign = (officialId, extra = {}) => call(routes.complaint.PATCH, { method: 'PATCH', id, token: admin.token, body: { action: 'assign', officialId, ...extra } });
+
+    assert.equal((await assign(powerOfficial.uid)).status, 400);
+    const unassigned = await makeUser('unassigned-official@example.test', 'official');
+    assert.equal((await assign(unassigned.uid)).status, 400);
+    assert.equal((await assign(alice.uid)).status, 400);
+    assert.equal((await complaintDoc(id)).assignedTo, undefined);
+
+    // Department text for notifications comes from the stored complaint, never the request
+    assert.equal((await assign(waterOfficial.uid, { departmentName: 'Forged Department' })).status, 400);
+
+    const ok = await assign(waterOfficial.uid);
+    assert.equal(ok.status, 200, JSON.stringify(ok.body));
+    assert.equal((await complaintDoc(id)).assignedTo, waterOfficial.uid);
+    assert.equal((await call(routes.complaint.GET, { id, token: waterOfficial.token })).status, 200);
+
+    const orphan = await seedComplaint({ citizenId: alice.uid, department: null, assignedDepartment: null });
+    const res = await call(routes.complaint.PATCH, { method: 'PATCH', id: orphan, token: admin.token, body: { action: 'assign', officialId: waterOfficial.uid } });
+    assert.equal(res.status, 409);
+});
+
+test('api: authority transfers a wrongly filed complaint; same record, new department, old department loses access', async () => {
+    // Filed under Electricity, actually a water leak; the power official is working it
+    const photo = await uploadEvidence(alice.uid);
+    const deadline = Timestamp.fromMillis(Date.now() + 5 * HOUR);
+    const id = await seedComplaint({
+        citizenId: alice.uid, citizenEmail: alice.email, category: 'Electricity', department: 'Electricity Board', assignedDepartment: 'Electricity Board',
+        status: 'in-progress', priority: 'high', photoURLs: [photo], assignedTo: powerOfficial.uid,
+        sla: { assignedHours: 12, deadline, remainingHours: 12, status: 'on-track' },
+    });
+    const before = await complaintDoc(id);
+    const transfer = (token, body) => call(routes.complaint.PATCH, { method: 'PATCH', id, token, body: { action: 'transfer', ...body } });
+    const valid = { department: 'Water Department', fromDepartment: 'Electricity Board', reason: 'Water pipe leak filed under Electricity' };
+
+    // Forged or invalid requests change nothing
+    assert.equal((await transfer(alice.token, valid)).status, 403);
+    assert.equal((await transfer(powerOfficial.token, valid)).status, 403);
+    assert.equal((await transfer(waterOfficial.token, valid)).status, 403);
+    assert.equal((await transfer(admin.token, { ...valid, department: 'Forged Department' })).status, 400);
+    assert.equal((await transfer(admin.token, { ...valid, reason: '' })).status, 400);
+    assert.equal((await transfer(admin.token, { ...valid, status: 'resolved' })).status, 400);
+    assert.equal((await transfer(admin.token, { ...valid, department: 'Electricity Board' })).status, 400);
+    assert.equal((await transfer(admin.token, { ...valid, fromDepartment: 'Sanitation Department' })).status, 409);
+    assert.equal((await call(routes.complaint.PATCH, { method: 'PATCH', id: 'missing-id', token: admin.token, body: { action: 'transfer', ...valid } })).status, 404);
+    assert.deepEqual(await complaintDoc(id), before);
+
+    // Two authorities acting on the same view at once: exactly one transfer happens
+    const [a, b] = await Promise.all([transfer(admin.token, valid), transfer(admin.token, { ...valid, department: 'Public Works Department' })]);
+    assert.deepEqual([a.status, b.status].sort(), [200, 409], JSON.stringify([a.body, b.body]));
+    const winner = a.status === 200 ? 'Water Department' : 'Public Works Department';
+    if (winner !== 'Water Department') {
+        const back = await transfer(admin.token, { department: 'Water Department', fromDepartment: winner, reason: 'Water pipe leak filed under Electricity' });
+        assert.equal(back.status, 200, JSON.stringify(back.body));
+    }
+    assert.equal((a.status === 200 ? a : b).body.notification, 'skipped'); // no SMTP configured in tests
+
+    const after = await complaintDoc(id);
+    assert.equal(after.department, 'Water Department');
+    assert.equal(after.assignedDepartment, 'Water Department');
+    assert.equal(after.assignedTo, undefined, 'the Electricity assignee cannot work it any more');
+    for (const field of ['trackingId', 'citizenId', 'category', 'status', 'priority', 'photoURLs', 'createdAt', 'lastStatusChange', 'sla']) {
+        assert.deepEqual(after[field], before[field], field);
+    }
+    const last = after.transfers.at(-1);
+    assert.equal(last.to, 'Water Department');
+    assert.equal(last.reason, 'Water pipe leak filed under Electricity');
+    assert.ok(after.transfers.every(t => !('by' in t)), 'actor stays in the audit log only');
+
+    const audit = (await adminDb().collection('auditLogs').where('complaintId', '==', id).get()).docs.map(d => d.data())
+        .filter(l => l.action === 'transferred' && l.newValue === 'Water Department');
+    assert.equal(audit.length, 1);
+    assert.equal(audit[0].performedBy, admin.uid);
+    assert.equal(audit[0].metadata.reason, 'Water pipe leak filed under Electricity');
+    assert.ok(audit[0].timestamp);
+
+    // API: destination department and the citizen see it; the old department doesn't
+    assert.equal((await call(routes.complaint.GET, { id, token: waterOfficial.token })).status, 200);
+    assert.equal((await call(routes.complaint.GET, { id, token: powerOfficial.token })).status, 404);
+    const own = await call(routes.complaint.GET, { id, token: alice.token });
+    assert.equal(own.status, 200);
+    assert.equal(own.body.data.complaint.trackingId, before.trackingId);
+    assert.equal(own.body.data.complaint.transfers.at(-1).to, 'Water Department');
+    const listed = async user => JSON.stringify((await call(routes.complaints.GET, { token: user.token })).body);
+    assert.ok((await listed(waterOfficial)).includes(id));
+    assert.ok(!(await listed(powerOfficial)).includes(id));
+    // The old department can no longer move it either
+    assert.equal((await call(routes.complaint.PATCH, { method: 'PATCH', id, token: powerOfficial.token, body: { action: 'updateStatus', status: 'under-review' } })).status, 403);
+
+    // Firestore rules follow the new department
+    await denied(fs.getDoc(fs.doc(clientFor(powerOfficial).db, 'complaints', id)));
+    assert.equal((await fs.getDoc(fs.doc(clientFor(waterOfficial).db, 'complaints', id))).get('trackingId'), before.trackingId);
+    assert.equal((await fs.getDoc(fs.doc(clientFor(alice).db, 'complaints', id))).get('department'), 'Water Department');
+
+    // Completed complaints are not transferred
+    const resolve = await call(routes.complaint.PATCH, { method: 'PATCH', id, token: admin.token, body: { action: 'updateStatus', status: 'resolved' } });
+    assert.equal(resolve.status, 200);
+    assert.equal((await transfer(admin.token, { department: 'Sanitation Department', fromDepartment: 'Water Department', reason: 'Testing a completed transfer' })).status, 409);
+});
+
+test('api: a transfer keeps an assignee who belongs to the destination', async () => {
+    const id = await seedComplaint({ citizenId: alice.uid, category: 'Water Supply', assignedTo: waterOfficial.uid, department: 'Electricity Board', assignedDepartment: 'Electricity Board' });
+    const res = await call(routes.complaint.PATCH, { method: 'PATCH', id, token: admin.token, body: { action: 'transfer', department: 'Water Department', fromDepartment: 'Electricity Board', reason: 'Belongs to Water' } });
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.equal((await complaintDoc(id)).assignedTo, waterOfficial.uid);
+});
+
+// ---------- demo account provisioning ----------
+
+const DEMO = {
+    citizen: { uid: 'demo-citizen', email: 'demo-citizen@example.test' },
+    official: { uid: 'demo-water-official', email: 'demo-water-official@example.test' },
+    authority: { uid: 'demo-authority', email: 'demo-authority@example.test' },
+};
+
+test('provisioning: refuses ambiguous or non-demo targets before touching anything', () => {
+    const out = path.join(os.tmpdir(), `demo-creds-${randomUUID()}.json`);
+    assert.notEqual(provision(['--out', out]).status, 0, 'no --project');
+    assert.notEqual(provision(['--project', 'jan-nivaran', '--out', out]).status, 0, 'emulator target must be a demo- project');
+    assert.notEqual(provision(['--project', PROJECT, '--live', '--out', out]).status, 0, '--live with emulator variables');
+
+    const liveEnv = { PATH: process.env.PATH, HOME: process.env.HOME };
+    const live = provision(['--project', 'jan-nivaran', '--out', out], liveEnv);
+    assert.notEqual(live.status, 0);
+    assert.match(live.stderr, /--live/);
+    assert.equal(nodeFs.existsSync(out), false);
+});
+
+test('provisioning: creates UID-matched demo accounts, is safe to rerun, and never takes over other accounts', async () => {
+    const out = path.join(os.tmpdir(), `demo-creds-${randomUUID()}.json`);
+
+    // Someone already registered the citizen address through public signup
+    const squatter = await signUp(DEMO.citizen.email);
+    const refused = provision(['--project', PROJECT, '--out', out]);
+    assert.notEqual(refused.status, 0);
+    assert.match(refused.stderr, /demo-citizen@example\.test/);
+    await assert.rejects(adminAuth().getUser(DEMO.official.uid), err => err.code === 'auth/user-not-found');
+    await adminAuth().deleteUser(squatter.uid);
+
+    const run = provision(['--project', PROJECT, '--out', out]);
+    assert.equal(run.status, 0, run.stderr);
+    assert.equal(nodeFs.statSync(out).mode & 0o777, 0o600);
+    const creds = JSON.parse(nodeFs.readFileSync(out, 'utf8'))[PROJECT].accounts;
+    assert.equal(creds.length, 3);
+    for (const c of creds) assert.ok(typeof c.password === 'string' && c.password.length >= 16);
+    assert.doesNotMatch(run.stdout + run.stderr, new RegExp(creds.map(c => c.password).join('|')), 'passwords must not be printed');
+
+    const profiles = Object.fromEntries(await Promise.all(Object.entries(DEMO).map(async ([k, d]) =>
+        [k, (await adminDb().collection('users').doc(d.uid).get()).data()])));
+    assert.equal(profiles.citizen.role, 'citizen');
+    assert.equal(profiles.official.role, 'official');
+    assert.equal(profiles.official.department, 'Water Department');
+    assert.equal(profiles.authority.role, 'admin');
+    assert.equal(profiles.authority.department, undefined);
+    for (const p of Object.values(profiles)) {
+        assert.equal(p.demo, true);
+        assert.ok(creds.every(c => !JSON.stringify(p).includes(c.password)), 'password stored in Firestore');
+    }
+
+    // Real email/password sign-in works and the app trusts the UID-matched profile
+    const byEmail = Object.fromEntries(creds.map(c => [c.email, c.password]));
+    const session = await signIn(DEMO.authority.email, byEmail[DEMO.authority.email]);
+    assert.equal(session.localId, DEMO.authority.uid);
+    assert.equal((await call(routes.stats.GET, { token: session.idToken })).status, 200);
+    const citizenSession = await signIn(DEMO.citizen.email, byEmail[DEMO.citizen.email]);
+    assert.equal((await call(routes.stats.GET, { token: citizenSession.idToken })).status, 403);
+
+    // Rerun keeps working passwords; rotation replaces them
+    assert.equal(provision(['--project', PROJECT, '--out', out]).status, 0);
+    assert.deepEqual(JSON.parse(nodeFs.readFileSync(out, 'utf8'))[PROJECT].accounts, creds);
+    assert.equal((await signIn(DEMO.citizen.email, byEmail[DEMO.citizen.email])).localId, DEMO.citizen.uid);
+    const rotated = provision(['--project', PROJECT, '--out', out, '--rotate-passwords']);
+    assert.equal(rotated.status, 0, rotated.stderr);
+    const newCreds = JSON.parse(nodeFs.readFileSync(out, 'utf8'))[PROJECT].accounts;
+    assert.notEqual(newCreds[0].password, creds[0].password);
+    assert.ok((await signIn(DEMO.citizen.email, byEmail[DEMO.citizen.email])).error, 'old password still works');
+});
+
+test('provisioning: cleanup removes only demo accounts and the demo citizen\'s complaints', async () => {
+    const out = path.join(os.tmpdir(), `demo-creds-${randomUUID()}.json`);
+    assert.equal(provision(['--project', PROJECT, '--out', out]).status, 0);
+    const creds = JSON.parse(nodeFs.readFileSync(out, 'utf8'))[PROJECT].accounts;
+    const citizen = await signIn(DEMO.citizen.email, creds.find(c => c.email === DEMO.citizen.email).password);
+    const photo = await uploadEvidence(DEMO.citizen.uid);
+    const filed = await call(routes.complaints.POST, { method: 'POST', token: citizen.idToken, body: { ...WATER, photoURLs: [photo] }, headers: { 'idempotency-key': randomUUID() } });
+    assert.equal(filed.status, 201, JSON.stringify(filed.body));
+    const kept = await seedComplaint({ citizenId: alice.uid, citizenEmail: alice.email });
+
+    const run = provision(['--project', PROJECT, '--out', out, '--cleanup']);
+    assert.equal(run.status, 0, run.stderr);
+
+    assert.equal((await adminDb().collection('complaints').doc(filed.body.data.id).get()).exists, false);
+    assert.equal((await adminDb().collection('trackingIds').doc(filed.body.data.trackingId).get()).exists, false);
+    assert.equal((await adminDb().collection('auditLogs').where('complaintId', '==', filed.body.data.id).get()).size, 0);
+    assert.equal((await adminDb().collection('complaintRequests').where('uid', '==', DEMO.citizen.uid).get()).size, 0);
+    const evidence = decodeURIComponent(new URL(photo).pathname.split('/o/')[1]);
+    assert.equal((await adminBucket().file(evidence).exists())[0], false);
+    for (const d of Object.values(DEMO)) {
+        await assert.rejects(adminAuth().getUser(d.uid), err => err.code === 'auth/user-not-found');
+        assert.equal((await adminDb().collection('users').doc(d.uid).get()).exists, false);
+    }
+    assert.equal(JSON.parse(nodeFs.readFileSync(out, 'utf8'))[PROJECT], undefined);
+    assert.ok((await adminDb().collection('complaints').doc(kept).get()).exists);
+    assert.ok((await adminAuth().getUser(alice.uid)).uid);
 });

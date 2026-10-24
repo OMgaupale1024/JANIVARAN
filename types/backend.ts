@@ -46,9 +46,11 @@ export interface Complaint {
     // SLA tracking
     sla: SLA;
 
-    // Assignment
+    // Assignment: assignedDepartment is the current handling department (access follows it);
+    // department mirrors it, and category stays as the citizen filed it
     assignedTo?: string;
     assignedDepartment: string;
+    transfers?: Array<{ from: string | null; to: string; reason: string; at: Timestamp }>;
 
     // Timestamps
     createdAt: Timestamp;

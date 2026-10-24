@@ -1,12 +1,20 @@
 // Unit tests for SLA, mapping and policy logic. Run: npm test
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const load = require('./load.cjs');
 
-const { calculateSLA, getSLADeadline } = load('@/lib/services/sla-service');
+// No Firebase Admin configuration or emulators: server code must fail as "unavailable"
+for (const key of ['FIREBASE_PROJECT_ID', 'FIREBASE_CLIENT_EMAIL', 'FIREBASE_PRIVATE_KEY', 'FIRESTORE_EMULATOR_HOST', 'FIREBASE_AUTH_EMULATOR_HOST']) {
+    delete process.env[key];
+}
+
+const load = require('./load.cjs');
+const { NextRequest } = require('next/server');
+
+const { calculateSLA, getSLADeadline, slaHoursForCategory } = load('@/lib/services/sla-service');
 const { isComplaintStalled, isSLABreached, getStalledStatusLabel } = load('@/lib/services/stalled-detection-service');
-const { complaintToGrievance } = load('@/lib/utils/type-mappers');
+const { complaintToGrievance, grievanceSLA } = load('@/lib/utils/type-mappers');
 const { getDashboardStats } = load('@/lib/services/dashboard-service');
+const { classifyComplaint, isValidCategory } = load('@/lib/engines/classification-engine');
 const policy = load('@/lib/complaint-policy');
 
 const HOUR = 60 * 60 * 1000;
@@ -27,15 +35,7 @@ function complaint(overrides = {}) {
 }
 
 // What the admin dashboard computes from the mapped Grievance
-const dashboardSLA = c => {
-    const g = complaintToGrievance(c);
-    return calculateSLA({
-        createdAt: g.submittedAt,
-        sla: { deadline: g.slaDeadline, assignedHours: g.slaHours },
-        status: g.status === 'RESOLVED' ? 'resolved' : 'open',
-        resolvedAt: g.resolvedAt,
-    }, NOW);
-};
+const dashboardSLA = c => grievanceSLA(complaintToGrievance(c), NOW);
 
 function assertAgreement(c) {
     const direct = calculateSLA(c, NOW);
@@ -81,9 +81,51 @@ test('resolved/closed complaints freeze the clock and are never stalled', () => 
     assert.equal(isComplaintStalled(resolvedOnTime, NOW), false);
 
     const withdrawnLate = complaint({ status: 'closed', createdAt: ago(200), hours: 24, closedAt: ago(100) });
-    assert.equal(calculateSLA(withdrawnLate, NOW).status, 'breached');
+    assert.equal(assertAgreement(withdrawnLate).status, 'breached');
+    assert.equal(dashboardSLA(withdrawnLate).closed, true);
     assert.equal(isComplaintStalled(withdrawnLate, NOW), false);
     assert.equal(getDashboardStats([withdrawnLate], NOW).breached, 0);
+});
+
+test('staff view keeps closed (withdrawn) complaints distinct from resolved ones', () => {
+    assert.equal(complaintToGrievance(complaint({ status: 'resolved', resolvedAt: ago(1) })).status, 'RESOLVED');
+    const withdrawn = complaintToGrievance(complaint({ status: 'closed', closedAt: ago(1), closedReason: 'withdrawn-by-citizen' }));
+    assert.equal(withdrawn.status, 'CLOSED');
+    assert.equal(withdrawn.closedReason, 'withdrawn-by-citizen');
+});
+
+test('inherited object keys are never categories', () => {
+    for (const name of ['toString', 'constructor', '__proto__', 'hasOwnProperty', 'valueOf']) {
+        assert.equal(isValidCategory(name), false, name);
+        assert.deepEqual(
+            policy.validateNewComplaint({ category: name, description: 'Pipe burst on main road', location: 'Ward 5' }),
+            { ok: false, error: 'Invalid category' },
+            name,
+        );
+        // Stored legacy data with such a category falls back to "Other" instead of undefined values
+        assert.deepEqual(classifyComplaint('Pipe burst on main road', name), { department: 'General Administration', slaHours: 120, priority: 'low' }, name);
+        assert.equal(slaHoursForCategory(name), 120, name);
+    }
+    assert.equal(isValidCategory('Water Supply'), true);
+    assert.equal(classifyComplaint('Pipe burst on main road', 'Water Supply').department, 'Water Department');
+});
+
+test('missing Firebase Admin configuration is reported as 503, not as an invalid session', async () => {
+    const { requireUser } = load('@/lib/server/auth');
+    const request = new Request('http://localhost/api/complaints', { headers: { authorization: 'Bearer any-token' } });
+    await assert.rejects(requireUser(request), err => err.status === 503);
+    await assert.rejects(requireUser(new Request('http://localhost/api/complaints')), err => err.status === 401);
+
+    const { POST } = load('@/app/api/complaints/route');
+    const res = await POST(new NextRequest('http://localhost/api/complaints', {
+        method: 'POST',
+        headers: { authorization: 'Bearer any-token', 'content-type': 'application/json' },
+        body: JSON.stringify({ category: 'Water Supply', description: 'Pipe burst on main road', location: 'Ward 5' }),
+    }));
+    assert.equal(res.status, 503);
+    const body = await res.json();
+    assert.equal(body.success, false);
+    assert.doesNotMatch(body.error, /session|sign in/i);
 });
 
 test('stalled detection uses time since the last status change', () => {
@@ -181,4 +223,74 @@ test('ticket validation', () => {
     assert.ok(policy.validateTicket({ reason: 'SLA deadline breached', message: 'please' }).ok);
     assert.equal(policy.validateTicket({ reason: 'made up' }).ok, false);
     assert.equal(policy.validateTicket({ reason: 'Other', message: 'x'.repeat(1001) }).ok, false);
+});
+
+test('GPS fix is appended once, keeps typed text, fits the limit and labels broad estimates', () => {
+    const fix = { latitude: 18.520412, longitude: 73.856743, accuracy: 25.4 };
+    const once = policy.withGpsFix('Ward 7 market gate', fix);
+    assert.equal(once, 'Ward 7 market gate (GPS 18.52041, 73.85674 ±25 m)');
+    // A second press replaces the earlier fix instead of appending another
+    assert.equal(policy.withGpsFix(once, { ...fix, accuracy: 9 }), 'Ward 7 market gate (GPS 18.52041, 73.85674 ±9 m)');
+    assert.equal(policy.withGpsFix('', fix), 'GPS 18.52041, 73.85674 ±25 m');
+
+    const coarse = policy.withGpsFix('Near bus stand', { ...fix, accuracy: 3200 });
+    assert.equal(coarse, 'Near bus stand (GPS 18.520, 73.857 ±3.2 km, approximate)');
+
+    // Long typed text is shortened so the whole fix still fits within the validated length
+    const long = policy.withGpsFix('x'.repeat(400), fix);
+    assert.ok(long.length <= policy.MAX_LOCATION);
+    assert.match(long, /\(GPS 18\.52041, 73\.85674 ±25 m\)$/);
+    assert.equal(policy.validateNewComplaint({ category: 'Other', description: 'Something is broken here', location: long }).ok, true);
+});
+
+test('citizen status breakdown counts each complaint once and keeps withdrawal apart from resolution', () => {
+    const at = new Date(NOW);
+    const sample = [
+        { status: 'pending' }, { status: 'under-review' }, { status: 'under-review' }, { status: 'in-progress' },
+        { status: 'escalated' }, { status: 'resolved', resolvedAt: at },
+        { status: 'closed', resolvedAt: at, closedAt: at }, // resolved, later closed
+        { status: 'closed', closedReason: 'withdrawn-by-citizen', closedAt: at },
+        { status: 'closed', closedAt: at }, // closed without resolution
+    ];
+    const counts = Object.fromEntries(policy.CITIZEN_STATUSES.map(s => [s.key, 0]));
+    sample.forEach(c => counts[policy.citizenStatus(c)]++);
+    assert.deepEqual(counts, { 'pending': 1, 'under-review': 2, 'in-progress': 1, 'escalated': 1, 'resolved': 2, 'closed': 1, 'withdrawn': 1 });
+    assert.equal(Object.values(counts).reduce((a, b) => a + b), sample.length);
+    // Every stored status has a segment
+    for (const status of policy.COMPLAINT_STATUSES) assert.ok(policy.CITIZEN_STATUSES.some(s => s.key === policy.citizenStatus({ status })));
+});
+
+test('transfer validation and policy', () => {
+    const body = { department: 'Water Department', fromDepartment: 'Electricity Board', reason: 'Water pipe leak filed under Electricity' };
+    assert.deepEqual(policy.validateTransfer(body), { ok: true, value: body });
+    assert.equal(policy.validateTransfer({ ...body, department: 'Forged Department' }).ok, false);
+    assert.equal(policy.validateTransfer({ ...body, department: 'toString' }).ok, false);
+    assert.equal(policy.validateTransfer({ ...body, reason: 'bad' }).ok, false);
+    assert.equal(policy.validateTransfer({ ...body, reason: 'x'.repeat(201) }).ok, false);
+    assert.equal(policy.validateTransfer({ department: body.department, reason: body.reason }).ok, false);
+    assert.deepEqual(policy.DEPARTMENTS.slice().sort(), ['Electricity Board', 'General Administration', 'Public Works Department', 'Sanitation Department', 'Transport Department', 'Water Department']);
+
+    const input = policy.validateTransfer(body).value;
+    const c = { citizenId: 'alice', status: 'in-progress', department: 'Electricity Board', assignedDepartment: 'Electricity Board' };
+    const adminActor = { uid: 'a', role: 'admin' };
+    assert.equal(policy.checkTransfer(adminActor, c, input), null);
+    assert.equal(policy.checkTransfer({ uid: 'o', role: 'official', department: 'Electricity Board' }, c, input)[0], 403);
+    assert.equal(policy.checkTransfer({ uid: 'alice', role: 'citizen' }, c, input)[0], 403);
+    assert.equal(policy.checkTransfer(adminActor, { ...c, status: 'resolved' }, input)[0], 409);
+    assert.equal(policy.checkTransfer(adminActor, { ...c, status: 'closed' }, input)[0], 409);
+    assert.equal(policy.checkTransfer(adminActor, { ...c, assignedDepartment: 'Water Department' }, input)[0], 409); // stale view
+    assert.equal(policy.checkTransfer(adminActor, c, { ...input, department: 'Electricity Board' })[0], 400); // same department
+});
+
+test('mapper shows the current department and transfers in the staff timeline', () => {
+    const at = new Date(NOW - HOUR);
+    const g = complaintToGrievance(complaint({
+        category: 'Electricity', department: 'Water Department', assignedDepartment: 'Water Department',
+        transfers: [{ from: 'Electricity Board', to: 'Water Department', reason: 'Pipe leak', at }],
+    }));
+    assert.equal(g.category, 'Electricity');
+    assert.equal(g.department, 'Water Department');
+    const entry = g.history.find(h => h.action === 'TRANSFERRED');
+    assert.equal(entry.timestamp, at.toISOString());
+    assert.equal(entry.details, 'Electricity Board → Water Department: Pipe leak');
 });

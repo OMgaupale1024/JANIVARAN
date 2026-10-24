@@ -81,7 +81,7 @@ export default function AIChatSupport() {
             responseText = "You can track your complaint status in real-time on your dashboard, just like an order delivery 🚚.\n\n**Statuses:**\n• **Submitted**: Received\n• **Assigned**: With an official\n• **In Progress**: Work started\n• **Resolved**: Fixed";
         }
         else if (lowerText.includes('sla') || lowerText.includes('time') || lowerText.includes('long') || lowerText.includes('delay')) {
-            responseText = "**SLA (Service Level Agreement)** is the promised time limit for resolution. \n\nIf the time is crossed, the complaint is automatically **Escalated** to senior authorities for deeper review.";
+            responseText = "**SLA (Service Level Agreement)** is the promised time limit for resolution. \n\nIf the time is crossed, the complaint is flagged as **Breached** on your dashboard and for staff. You can then use **Raise Issue** to record why it needs attention and raise its priority.";
         }
 
         // 3. Filing Guidance
@@ -91,7 +91,7 @@ export default function AIChatSupport() {
 
         // 4. Contact & Escalation
         else if (lowerText.includes('contact') || lowerText.includes('call') || lowerText.includes('phone') || lowerText.includes('email') || lowerText.includes('talk') || lowerText.includes('support')) {
-            responseText = "You can notify the authority directly if needed.\n\n📞 **Support**: 9322088956\n✉️ **Email**: ogaupale@gmail.com\n\nIf your complaint is stalled, you can also use the 'Escalate' button on the dashboard.";
+            responseText = "You can notify the authority directly if needed.\n\n📞 **Support**: 9322088956\n✉️ **Email**: ogaupale@gmail.com\n\nIf your complaint is stalled, you can also use the 'Raise Issue' button on your dashboard.";
         }
 
         // 5. General Greeting / Unclear

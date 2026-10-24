@@ -6,6 +6,19 @@ import { useRouter } from 'next/navigation';
 import { Mail, Lock, ArrowLeft, Loader2 } from 'lucide-react';
 import { useAuth } from '@/lib/auth-context';
 
+// Where to go after signing in: a same-site path from ?next=, otherwise the dashboard.
+// Parsed with URL (which also strips tabs/newlines) so "//host" tricks resolve off-site and are refused.
+function nextPath(): string {
+    const next = new URLSearchParams(window.location.search).get('next') ?? '';
+    try {
+        const url = new URL(next, window.location.origin);
+        if (next.startsWith('/') && url.origin === window.location.origin) return url.pathname + url.search + url.hash;
+    } catch {
+        // not a URL
+    }
+    return '/citizen/dashboard';
+}
+
 export default function CitizenLogin() {
     const router = useRouter();
     const { signIn, signInWithGoogle, user } = useAuth();
@@ -19,7 +32,7 @@ export default function CitizenLogin() {
     // Redirect if already logged in
     React.useEffect(() => {
         if (user) {
-            router.push('/citizen/dashboard');
+            router.push(nextPath());
         }
     }, [user, router]);
 
@@ -31,7 +44,7 @@ export default function CitizenLogin() {
         try {
             await signIn(email, password);
             // Use window.location for more reliable redirect
-            window.location.href = '/citizen/dashboard';
+            window.location.href = nextPath();
         } catch (err) {
             setError(err instanceof Error && err.message ? err.message : 'Failed to sign in. Please check your credentials.');
             setLoading(false);
@@ -45,7 +58,7 @@ export default function CitizenLogin() {
         try {
             await signInWithGoogle();
             // Use window.location for more reliable redirect
-            window.location.href = '/citizen/dashboard';
+            window.location.href = nextPath();
         } catch (err) {
             setError(err instanceof Error && err.message ? err.message : 'Failed to sign in with Google.');
             setLoading(false);
