@@ -10,8 +10,8 @@ citizen sees the department, timeline and chart update. Everything below reflect
 
 | Option | URL | Notes |
 | --- | --- | --- |
-| Local, emulators | <http://localhost:3000> | Everything works, including photo evidence. No cloud data or email. See [Local demo](#local-demo-on-emulators). **Use this for the full demo today.** |
-| Hosted | <https://oraoss.in> | Serves the `main` branch. Until this branch is merged and deployed, the site runs older code: no working **Use GPS** (the button has no handler there), no transfer, no status chart. Photo upload fails on the hosted site until Firebase Storage exists (see below). |
+| Hosted | <https://oraoss.in> | Production, deployed from `main`. Real Firebase project `jan-nivaran`; email is skipped for the `@example.test` demo accounts. Check the commit being served with `vercel inspect oraoss.in` before a demo. |
+| Local, emulators | <http://localhost:3000> | Same code with no cloud data or email. See [Local demo](#local-demo-on-emulators). |
 
 Branch previews (`*.vercel.app` preview URLs) are **not** usable: the Preview environment has no Firebase Admin
 credentials, so every API call answers `503`. Say which URL (and commit) you are showing.
@@ -34,25 +34,19 @@ profile share a single Firebase sign-in, so signing in as the official would sig
 **A demo photo:** any small JPG, PNG or WebP under 5 MB that shows nothing private (for example a photo of a
 tap, or a plain test image). Up to three photos per complaint.
 
-### Photo evidence on the hosted site (owner action needed)
+### Photo evidence on the hosted site
 
-Checked directly on 24 October 2026: Firebase project `jan-nivaran` has **no Cloud Storage bucket**
-(`jan-nivaran.firebasestorage.app`, the name the web app and server are configured with, does not exist) and
-**Cloud Billing is disabled** for the project. New default buckets need the pay-as-you-go **Blaze** plan, so
-uploads cannot succeed until the project owner:
+Storage for `jan-nivaran` was set up on 24 October 2026: bucket `gs://jan-nivaran.firebasestorage.app` in
+`us-east1` (one of the regions with the no-cost Storage quota), on the Blaze plan. That bucket name matches
+`NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET` in Vercel, which both the browser and the server use. A demo photo was
+uploaded through the hosted form and loaded for the Authority and the water official.
 
-1. Firebase console → project **jan-nivaran** → upgrade to **Blaze** (set a budget alert if wanted).
-2. **Build → Storage → Get started**. Choose a location (a US region such as `us-central1` keeps the
-   no-cost Storage quota; `asia-south1` matches Firestore but is billed from the first byte). Start in
-   production mode.
-3. Confirm the bucket shown is `gs://jan-nivaran.firebasestorage.app` (it must match
-   `NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET` in Vercel). If it differs, update that variable in Vercel and redeploy.
-4. Publish the repository's rules (Hosting deploys never do this):
-   `npx firebase-tools@15.34.0 deploy --only storage --project jan-nivaran`.
-5. File one complaint with a demo photo on the hosted site and check that staff can see the photo.
+Storage rules are not deployed by Vercel. Publish the repository's `storage.rules` whenever they change:
+`npx firebase-tools@15.34.0 deploy --only storage --project jan-nivaran` (after `firebase login`).
 
-Until then the hosted form says **"Photo storage isn't set up on this site yet"** with the detail
-`Photo upload failed: storage/unknown (HTTP 404)`, keeps everything typed, and offers **Submit without photos**.
+If Storage is unavailable, the form says which step failed and why, e.g. **"Photo storage isn't set up on this site
+yet"** with `Photo upload failed: storage/unknown (HTTP 404)`, keeps everything typed, and offers
+**Submit without photos**.
 
 ## Walkthrough
 
@@ -84,7 +78,12 @@ Note it. The dashboard shows it as PENDING, "Filed as Electricity • Handled by
 Expected: "Transferred to Water Department…", the department badge changes, and the timeline lists the transfer
 with its reason. Tracking ID, status, priority, photo and SLA deadline are unchanged; it is not a new complaint.
 An Electricity official who had it open sees the details close and a note that it left their queue; the server
-now refuses them. Only the Authority can transfer, and only active complaints.
+and Firestore now refuse them. Only the Authority can transfer, and only active complaints.
+
+Photo links are Firebase download URLs with a token: anyone holding a copied link can open the photo. A
+transfer does **not** revoke those tokens automatically. They can be revoked (Firebase console → Storage →
+the file → **Access token** → revoke, or by replacing the object's `firebaseStorageDownloadTokens` metadata
+with the Admin SDK); the complaint would then need its stored link updated to the new token.
 
 ### 3. Water official works it (profile B)
 
@@ -107,7 +106,8 @@ actions if called directly.
    chart counts move (Under Review → In Progress → Resolved). The chart counts each complaint once and shows
    "Resolved: N of M complaints (P%)", which is the share of the citizen's complaints that are resolved, not how
    much of any repair is done. Withdrawn and "closed without resolution" are counted separately from resolved.
-2. Click the complaint: the timeline shows each stage reached and **Department changes** with the reason.
+2. Click the complaint: the timeline shows each stage reached, **Your photos**, and **Department changes**
+   with the reason.
 3. Open `/track`, enter the tracking ID: category, current department, status, priority, SLA and timeline appear.
    Title, description, location, GPS and the citizen's identity are not shown.
 

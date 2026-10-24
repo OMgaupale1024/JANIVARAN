@@ -471,6 +471,9 @@ test('citizen sees the resolved status; public tracking shows only redacted deta
     // The per-complaint timeline shows the transfer
     await page.getByText(TITLE).first().click();
     await expect(page.getByText(`transferred from Electricity Board to Water Department. Reason: ${TRANSFER_REASON}`)).toBeVisible();
+    // ...and the citizen's own photo, actually loaded from Storage
+    const photo = page.getByRole('img', { name: 'Your photo 1' });
+    await expect.poll(() => photo.evaluate((img: HTMLImageElement) => img.complete && img.naturalWidth > 0)).toBe(true);
 
     // Phone width: no sideways scrolling
     await page.setViewportSize({ width: 390, height: 844 });
