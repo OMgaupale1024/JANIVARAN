@@ -159,6 +159,21 @@ export default function SLATracker({ complaint }: SLATrackerProps) {
                 })}
             </div>
 
+            {/* The citizen's own evidence, as attached when filing */}
+            {complaint.photoURLs?.length ? (
+                <div className="mt-6">
+                    <h4 className="font-semibold text-gray-900 mb-2">Your photos</h4>
+                    <div className="grid grid-cols-3 gap-2">
+                        {complaint.photoURLs.map((url, i) => (
+                            <a key={url} href={url} target="_blank" rel="noopener noreferrer" className="block aspect-square rounded-lg overflow-hidden border border-gray-200 bg-gray-100">
+                                {/* eslint-disable-next-line @next/next/no-img-element -- private evidence must not pass through the shared image optimizer cache */}
+                                <img src={url} alt={`Your photo ${i + 1}`} className="w-full h-full object-cover" />
+                            </a>
+                        ))}
+                    </div>
+                </div>
+            ) : null}
+
             {/* Department transfers (e.g. filed under the wrong category); same complaint, same deadline */}
             {complaint.transfers?.length ? (
                 <div className="mt-6">
