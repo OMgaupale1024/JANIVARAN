@@ -1,19 +1,20 @@
 # JanNivaran demo guide
 
-A five-minute walkthrough of one complaint moving citizen → water official → authority → citizen,
-using real email/password accounts. Everything below reflects what the app actually does.
+A walkthrough of one complaint that the citizen files under the **wrong category**: the Authority transfers
+it to the right department (same tracking ID), the water official works it, the Authority resolves it, and the
+citizen sees the department, timeline and chart update. Everything below reflects what the app actually does.
 
 ## Before you start
 
-**Where to run it**
+**Where to run it** (state checked on 24 October 2026)
 
 | Option | URL | Notes |
 | --- | --- | --- |
-| Hosted | <https://oraoss.in> | Serves the `main` branch. Merge this fix branch first, or the site still runs the old code (slow submissions, photo uploads that hang, no Completed view). Photo evidence is unavailable until Firebase Storage is enabled (see below). |
-| Local, emulators | <http://localhost:3000> | No cloud data or email; photo evidence works. See [Local demo](#local-demo-on-emulators). |
+| Local, emulators | <http://localhost:3000> | Everything works, including photo evidence. No cloud data or email. See [Local demo](#local-demo-on-emulators). **Use this for the full demo today.** |
+| Hosted | <https://oraoss.in> | Serves the `main` branch. Until this branch is merged and deployed, the site runs older code: no working **Use GPS** (the button has no handler there), no transfer, no status chart. Photo upload fails on the hosted site until Firebase Storage exists (see below). |
 
-Branch previews (`*.vercel.app` preview URLs) are **not** usable for the demo: the Preview environment has
-no Firebase Admin credentials, so every API call answers `503`.
+Branch previews (`*.vercel.app` preview URLs) are **not** usable: the Preview environment has no Firebase Admin
+credentials, so every API call answers `503`. Say which URL (and commit) you are showing.
 
 **Accounts** (created by `scripts/provision-demo.mjs`, UIDs `demo-citizen`, `demo-water-official`, `demo-authority`)
 
@@ -24,67 +25,100 @@ no Firebase Admin credentials, so every API call answers `503`.
 | `demo-authority@example.test` | admin (Authority) | none (sees all) | `/admin/login` → **Authority** |
 
 Passwords live only in `.demo-credentials.json` (gitignored, mode 600) on the machine that ran the
-provisioning command. Don't show that file on screen. `@example.test` addresses can never receive
+provisioning command. Reuse them; don't show that file on screen. `@example.test` addresses can never receive
 mail, so the app skips email for these accounts.
 
-**Use three separate browser profiles** (or three different browsers). Tabs and windows of one profile
-share a single Firebase sign-in, so signing in as the official would sign the citizen out.
+**Use three separate browser profiles** (or three different browsers), one per role. Tabs and windows of one
+profile share a single Firebase sign-in, so signing in as the official would sign the citizen out.
 
-**Photo evidence on the hosted site:** project `jan-nivaran` has no Cloud Storage bucket, so uploads cannot
-succeed there. Skip the photo step; if someone attaches one anyway, the form stops within about 20 seconds
-with "Couldn't reach photo storage…" and keeps everything they typed. Enabling it is a console step that
-needs the Blaze plan (Firebase console → Storage → Get started), followed by deploying `storage.rules`.
+**A demo photo:** any small JPG, PNG or WebP under 5 MB that shows nothing private (for example a photo of a
+tap, or a plain test image). Up to three photos per complaint.
+
+### Photo evidence on the hosted site (owner action needed)
+
+Checked directly on 24 October 2026: Firebase project `jan-nivaran` has **no Cloud Storage bucket**
+(`jan-nivaran.firebasestorage.app`, the name the web app and server are configured with, does not exist) and
+**Cloud Billing is disabled** for the project. New default buckets need the pay-as-you-go **Blaze** plan, so
+uploads cannot succeed until the project owner:
+
+1. Firebase console → project **jan-nivaran** → upgrade to **Blaze** (set a budget alert if wanted).
+2. **Build → Storage → Get started**. Choose a location (a US region such as `us-central1` keeps the
+   no-cost Storage quota; `asia-south1` matches Firestore but is billed from the first byte). Start in
+   production mode.
+3. Confirm the bucket shown is `gs://jan-nivaran.firebasestorage.app` (it must match
+   `NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET` in Vercel). If it differs, update that variable in Vercel and redeploy.
+4. Publish the repository's rules (Hosting deploys never do this):
+   `npx firebase-tools@15.34.0 deploy --only storage --project jan-nivaran`.
+5. File one complaint with a demo photo on the hosted site and check that staff can see the photo.
+
+Until then the hosted form says **"Photo storage isn't set up on this site yet"** with the detail
+`Photo upload failed: storage/unknown (HTTP 404)`, keeps everything typed, and offers **Submit without photos**.
 
 ## Walkthrough
 
-### 1. Citizen files a complaint (profile A)
+### 1. Citizen files under the wrong category (profile A)
 
-1. Open `/citizen`, sign in as `demo-citizen@example.test`. You land on the citizen dashboard.
-2. **File Complaint** → **Water Supply**.
+1. Open `/citizen`, sign in as `demo-citizen@example.test`. The dashboard shows status cards and, once you
+   have complaints, **Your complaints by status**.
+2. **File Complaint** → choose **Electricity** (deliberately wrong).
 3. Title `DEMO Water leak near Ward 7 market`; description `Main pipe leaking onto the road near the market gate.`;
-   location `Ward 7 market gate (demo)`. Optional: **Use GPS** appends the browser's coordinates (after a
-   permission prompt); they are visible to the citizen and staff only, never on public tracking.
-4. **Next Step** → **Submit Complaint** (no photo on the hosted site).
+   location `Ward 7 market gate (demo)`.
+4. Optional: **Use GPS**. The button shows **Locating…** while the browser works; allow the permission prompt.
+   Coordinates and accuracy are appended, e.g. `(GPS 18.52040, 73.85670 ±25 m)`; a broad estimate is marked
+   `approximate`. Pressing again replaces the fix. If permission is blocked, location services are off, or the
+   prompt is ignored for 20 seconds, the message says which, and you can type the landmark instead. Coordinates
+   are visible to the citizen and the handling staff only, never on public tracking.
+5. **Next Step** → attach the demo photo → **Submit Complaint**.
 
-Expected: the button shows "Saving your complaint…", then **Complaint Filed Successfully!** with a tracking
-ID like `JAN-123456`. **Go to Dashboard** shows the complaint as PENDING. Note the tracking ID.
+Expected: progress for the photo, then **Complaint Filed Successfully!** with a tracking ID like `JAN-123456`.
+Note it. The dashboard shows it as PENDING, "Filed as Electricity • Handled by Electricity Board".
 
-### 2. Water official works it (profile B)
-
-1. Open `/admin/login`, choose **Official**, sign in as `demo-water-official@example.test`.
-2. **All Complaints** (Active view) lists Water Department complaints only, newest first.
-3. Click the eye icon on the demo complaint. About a second later the status badge changes to
-   **Under Review** (opening a pending complaint marks it, once).
-4. **Mark as In Progress** → the badge shows **In Progress** once the server confirms.
-
-Expected: there is no **Resolve** or **Critical Priority** button for officials, and the server refuses those
-actions even if called directly.
-
-### 3. Authority resolves it (profile C)
+### 2. Authority transfers it to the Water Department (profile C)
 
 1. Open `/admin/login`, choose **Authority**, sign in as `demo-authority@example.test`.
-2. **All Complaints** shows every department. Open the demo complaint.
-3. **Mark as Critical Priority**, then **Close & Resolve Complaint**. The badge shows **Resolved**.
-4. Close the dialog. The complaint leaves **Active**; switch to **Completed** (or **All**) to find it again,
-   marked RESOLVED. Withdrawn complaints appear there as WITHDRAWN, not as resolved.
+2. **All Complaints** → eye icon on the demo complaint. The header shows **Filed as Electricity** and the current
+   department **Electricity Board**. (Opening a pending complaint marks it **Under Review**.)
+3. Under **Wrong department?** choose **Water Department**, reason `Water pipe leak filed under Electricity`,
+   then **Transfer to department**.
 
-### 4. Citizen and public view (profile A, then any window)
+Expected: "Transferred to Water Department…", the department badge changes, and the timeline lists the transfer
+with its reason. Tracking ID, status, priority, photo and SLA deadline are unchanged; it is not a new complaint.
+An Electricity official who had it open sees the details close and a note that it left their queue; the server
+now refuses them. Only the Authority can transfer, and only active complaints.
 
-1. Refresh the citizen dashboard: the complaint shows RESOLVED; expand it for the timeline with timestamps.
-2. Open `/track`, enter the tracking ID: category, department, status, priority, SLA and timeline appear.
+### 3. Water official works it (profile B)
+
+1. Open `/admin/login`, choose **Official**, sign in as `demo-water-official@example.test`.
+2. **All Complaints** lists Water Department complaints only; the demo complaint is now there with its photo.
+3. Open it → **Mark as In Progress**. The badge shows **In Progress** once the server confirms.
+
+Officials have no **Resolve**, **Critical Priority** or **Transfer** controls, and the server refuses those
+actions if called directly.
+
+### 4. Authority resolves it (profile C)
+
+1. Open the demo complaint again → **Close & Resolve Complaint**. The badge shows **Resolved**; the transfer
+   form disappears (completed complaints can't be transferred).
+2. Close the dialog. The complaint leaves **Active**; **Completed** (or **All**) still shows it as RESOLVED.
+
+### 5. Citizen view and public tracking (profile A, then any window)
+
+1. The citizen dashboard updates live: "Filed as Electricity • Handled by Water Department", RESOLVED, and the
+   chart counts move (Under Review → In Progress → Resolved). The chart counts each complaint once and shows
+   "Resolved: N of M complaints (P%)", which is the share of the citizen's complaints that are resolved, not how
+   much of any repair is done. Withdrawn and "closed without resolution" are counted separately from resolved.
+2. Click the complaint: the timeline shows each stage reached and **Department changes** with the reason.
+3. Open `/track`, enter the tracking ID: category, current department, status, priority, SLA and timeline appear.
    Title, description, location, GPS and the citizen's identity are not shown.
 
-### 5. Access isolation (optional)
+### Access isolation and error paths (optional)
 
-Another citizen sees none of these complaints; an official of another department sees only their own
-department; direct API calls and Firestore reads are refused. All of this runs automatically in
-`npm run test:e2e` and `npm run test:emulator`, which is quicker than showing it live.
+Another citizen sees none of these complaints; an official of another department sees only their own department;
+direct API calls and Firestore reads are refused. `npm run test:e2e` runs this whole walkthrough automatically on
+the emulators, including GPS failures, a missing bucket, and the transfer access changes.
 
-### Showing an error path (optional)
-
-On step 1, turn the network off just before **Submit Complaint**: the form says it couldn't confirm the
-complaint was received and keeps everything. Turn the network back on and press **Submit Complaint** again:
-you get the same tracking ID. A retry never creates a duplicate, even if the first attempt was saved.
+Turn the network off just before **Submit Complaint**: the form says it couldn't confirm the complaint was
+received and keeps everything. Turn it back on and submit again: same tracking ID, never a duplicate.
 
 ## What is and isn't automatic
 

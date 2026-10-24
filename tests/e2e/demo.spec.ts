@@ -1,8 +1,10 @@
 // The three-role demonstration in a real browser, against the Firebase emulators:
-// citizen files -> water official works it -> authority resolves -> citizen and public see it.
+// citizen files a water leak under the wrong category (Electricity) -> authority transfers it to the
+// Water Department -> water official works it -> authority resolves -> citizen and public see it.
 import { test, expect, type Browser, type BrowserContext, type Page } from '@playwright/test';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { deleteApp, initializeApp } from 'firebase-admin/app';
@@ -29,6 +31,45 @@ const OTHER_CITIZEN = { name: 'Other Citizen', email: 'other-citizen@example.tes
 let citizen: { context: BrowserContext; page: Page };
 let trackingId = '';
 let complaintId = '';
+const TRANSFER_REASON = 'Water pipe leak filed under Electricity';
+
+// Count shown for one status in the citizen's chart
+const chartCount = (page: Page, status: string) =>
+    page.getByTestId('status-chart').locator(`[data-status="${status}"] > span`).last();
+
+// Swap the emulator's Firestore rules (restored from firestore.rules afterwards)
+async function setFirestoreRules(content: string) {
+    const res = await fetch(`http://${FIRESTORE}/emulator/v1/projects/${PROJECT}:securityRules`, {
+        method: 'PUT',
+        body: JSON.stringify({ rules: { files: [{ name: 'firestore.rules', content }] } }),
+    });
+    expect(res.ok).toBe(true);
+}
+
+// A controllable navigator.geolocation: tests answer each request (or never answer it) by index
+function stubGeolocation() {
+    type Call = { ok: (p: unknown) => void; fail: (e: unknown) => void };
+    const w = window as unknown as { __gps: { calls: Call[]; permission: string } };
+    w.__gps = { calls: [], permission: 'prompt' };
+    Object.defineProperty(navigator, 'geolocation', {
+        configurable: true,
+        value: { getCurrentPosition: (ok: Call['ok'], fail: Call['fail']) => { w.__gps.calls.push({ ok, fail }); } },
+    });
+    const query = navigator.permissions.query.bind(navigator.permissions);
+    navigator.permissions.query = (d => (d.name === 'geolocation'
+        ? Promise.resolve({ state: w.__gps.permission })
+        : query(d))) as typeof navigator.permissions.query;
+}
+type GpsWindow = { __gps: { calls: Array<{ ok: (p: unknown) => void; fail: (e: unknown) => void }>; permission: string } };
+const gpsCalls = (page: Page) => page.evaluate(() => (window as unknown as GpsWindow).__gps.calls.length);
+const gpsFix = (page: Page, i: number, accuracy: number) => page.evaluate(([i, accuracy]) => {
+    (window as unknown as GpsWindow).__gps.calls[i].ok({ coords: { latitude: 18.5204, longitude: 73.8567, accuracy } });
+}, [i, accuracy]);
+const gpsError = (page: Page, i: number, code: number, permission = 'prompt') => page.evaluate(([i, code, permission]) => {
+    const gps = (window as unknown as GpsWindow).__gps;
+    gps.permission = permission as string;
+    gps.calls[i as number].fail({ code, PERMISSION_DENIED: 1, POSITION_UNAVAILABLE: 2, TIMEOUT: 3 });
+}, [i, code, permission] as const);
 
 test.describe.configure({ mode: 'serial' });
 // Note: Next.js renders a route announcer with role="alert", so alerts are matched by their text
@@ -92,17 +133,22 @@ test.afterAll(async () => {
     await deleteApp(admin);
 });
 
-test('citizen files a Water Supply complaint; failed attempts keep the draft and never duplicate it', async ({ browser }) => {
+test('citizen files a water leak under the wrong category (Electricity); failed attempts keep the draft and never duplicate it', async ({ browser }) => {
     citizen = await citizenLogin(browser, accounts.citizen.email, accounts.citizen.password);
     const { page } = citizen;
 
     await page.getByRole('link', { name: 'File Complaint' }).first().click();
-    await page.getByRole('button', { name: 'Water Supply' }).click();
+    await page.getByRole('button', { name: 'Electricity' }).click();
     await page.getByLabel('Title (Optional)').fill(TITLE);
     await page.getByLabel('Description').fill(DESCRIPTION);
     await page.getByLabel('Location').fill(LOCATION);
     await page.getByRole('button', { name: 'Use GPS' }).click();
     await expect(page.getByLabel('Location')).toHaveValue(/Ward 7 market gate \(GPS 18\.5204\d*, 73\.8567\d* ±25 m\)/);
+    await expect(page.getByText(/Coordinates added \(accurate to about 25 m\)/)).toBeVisible();
+    // Pressing again refreshes the fix instead of appending a second one
+    await page.getByRole('button', { name: 'Use GPS' }).click();
+    await expect(page.getByRole('button', { name: 'Use GPS' })).toBeEnabled();
+    expect((await page.getByLabel('Location').inputValue()).match(/GPS/g)).toHaveLength(1);
     await page.getByRole('button', { name: /Next Step/ }).click();
 
     // Oversized photos are refused before upload; a valid one is accepted
@@ -111,18 +157,27 @@ test('citizen files a Water Supply complaint; failed attempts keep the draft and
     await page.locator('#photo-upload').setInputFiles({ name: 'leak.png', mimeType: 'image/png', buffer: PNG });
     await expect(page.getByText('leak.png')).toBeVisible();
 
-    // 1) Storage refuses the upload: clear error, draft kept, nothing sent to the API
+    // 1) The bucket doesn't exist (the hosted project's state) or Storage refuses the upload:
+    //    each is named, with the failed stage and code; draft kept; nothing sent to the API
     let apiCalls = 0;
     page.on('request', r => { if (r.url().endsWith('/api/complaints') && r.method() === 'POST') apiCalls++; });
-    await page.route('**/v0/b/**', route => route.fulfill({
-        status: 403,
+    const storageAnswers = (status: number, message: string) => page.route('**/v0/b/**', route => route.fulfill({
+        status,
         headers: { 'access-control-allow-origin': '*' },
         contentType: 'application/json',
-        body: '{"error":{"code":403,"message":"Permission denied."}}',
+        body: JSON.stringify({ error: { code: status, message } }),
     }));
+    await storageAnswers(404, 'Not Found.');
     await page.getByRole('button', { name: /Submit Complaint/ }).click();
-    await expect(page.getByRole('alert').filter({ hasText: /upload was refused/i })).toBeVisible();
+    const missing = page.getByRole('alert').filter({ hasText: /photo storage isn't set up/i });
+    await expect(missing).toContainText('Photo upload failed: storage/unknown (HTTP 404)');
+    await expect(missing.getByRole('button', { name: 'Submit without photos' })).toBeVisible();
+    await page.unroute('**/v0/b/**');
+    await storageAnswers(403, 'Permission denied.');
+    await page.getByRole('button', { name: /Submit Complaint/ }).click();
+    await expect(page.getByRole('alert').filter({ hasText: /refused the upload/i })).toContainText('storage/unauthorized (HTTP 403)');
     await expect(page.getByRole('button', { name: /Submit Complaint/ })).toBeEnabled();
+    await expect(page.getByLabel('Selected photos')).toContainText('leak.png');
     expect(apiCalls).toBe(0);
     await page.unroute('**/v0/b/**');
 
@@ -155,6 +210,9 @@ test('citizen files a Water Supply complaint; failed attempts keep the draft and
     expect(filed).toHaveLength(1);
     expect(filed[0].get('trackingId')).toBe(trackingId);
     expect(filed[0].get('photoURLs')).toHaveLength(1);
+    expect(filed[0].get('category')).toBe('Electricity');
+    expect(filed[0].get('assignedDepartment')).toBe('Electricity Board');
+    expect(filed[0].get('location')).toMatch(/^Ward 7 market gate \(GPS /);
     complaintId = filed[0].id;
 
     await page.getByRole('link', { name: 'Go to Dashboard' }).click();
@@ -179,6 +237,123 @@ test('an expired session is refreshed once without duplicating the complaint', a
     await expect(page.getByRole('heading', { name: 'Complaint Filed Successfully!' })).toBeVisible();
     expect(posts).toBe(2);
     await page.unroute('**/api/complaints');
+});
+
+test('GPS: no overlapping requests, unanswered prompts end, late fixes never overwrite, failures are told apart', async ({ browser }) => {
+    const context = await browser.newContext();
+    await context.addInitScript(stubGeolocation);
+    const page = await context.newPage();
+    await page.goto('/file-complaint');
+    await page.getByRole('button', { name: 'Roads & Potholes' }).click();
+    const location = page.getByLabel('Location');
+    const status = page.locator('#gps-status');
+    const gps = page.getByRole('button', { name: /Use GPS|Locating/ });
+
+    // Locating state; a second press while waiting starts nothing
+    await location.fill('Opposite Ward 3 school');
+    await gps.click();
+    await expect(gps).toHaveText(/Locating/);
+    await expect(gps).toBeDisabled();
+    await gps.click({ force: true });
+    expect(await gpsCalls(page)).toBe(1);
+
+    // Broad estimate: labelled approximate, typed text kept
+    await gpsFix(page, 0, 4200);
+    await expect(location).toHaveValue('Opposite Ward 3 school (GPS 18.520, 73.857 ±4.2 km, approximate)');
+    await expect(status).toContainText('Approximate location added');
+
+    // Each failure is described separately, and the field stays editable
+    const failures: Array<[number, string, RegExp]> = [
+        [1, 'denied', /blocked for this site/],
+        [1, 'granted', /location services are off/],
+        [1, 'prompt', /wasn't given/],
+        [2, 'prompt', /couldn't work out its location/],
+        [3, 'prompt', /took too long/],
+    ];
+    for (const [code, permission, message] of failures) {
+        await gps.click();
+        await gpsError(page, (await gpsCalls(page)) - 1, code, permission);
+        await expect(status).toContainText(message);
+        await expect(gps).toBeEnabled();
+    }
+    await expect(location).toHaveValue(/Opposite Ward 3 school/);
+
+    // Editing while locating stops the request; its late fix is ignored
+    await gps.click();
+    const edited = await gpsCalls(page) - 1;
+    await location.fill('Gate 2, Ward 3 school');
+    await expect(status).toContainText('stopped because you edited');
+    await gpsFix(page, edited, 10);
+    await expect(location).toHaveValue('Gate 2, Ward 3 school');
+
+    // A prompt nobody answers: the button comes back, and an answer after that changes nothing
+    await gps.click();
+    const unanswered = await gpsCalls(page) - 1;
+    await sleep(21_000);
+    await expect(status).toContainText('No location yet');
+    await expect(gps).toBeEnabled();
+    await gpsFix(page, unanswered, 10);
+    await expect(location).toHaveValue('Gate 2, Ward 3 school');
+    await context.close();
+
+    // A real browser where the site has no location permission
+    const plain = await browser.newContext();
+    const denied = await plain.newPage();
+    await denied.goto('/file-complaint');
+    await denied.getByRole('button', { name: 'Roads & Potholes' }).click();
+    await denied.getByRole('button', { name: 'Use GPS' }).click();
+    await expect(denied.locator('#gps-status')).toContainText(/blocked for this site|wasn't given|location services|No location yet/);
+    await expect(denied.getByRole('button', { name: 'Use GPS' })).toBeEnabled();
+    await plain.close();
+});
+
+test('authority transfers the complaint to the Water Department; the Electricity official loses it', async ({ browser }) => {
+    // The Electricity official has it open; the citizen watches their dashboard (live counts)
+    const power = await staffLogin(browser, 'Official', ELECTRICITY.email, ELECTRICITY.password);
+    await citizen.page.goto('/citizen/dashboard');
+    await expect(chartCount(citizen.page, 'under-review')).toHaveText('0');
+    await power.page.getByRole('button', { name: `View details for ${TITLE}` }).click();
+    await expect(power.page.getByRole('dialog').getByTestId('complaint-status')).toHaveText('Under Review');
+    await expect(chartCount(citizen.page, 'under-review')).toHaveText('1');
+    const before = (await db.collection('complaints').doc(complaintId).get()).data()!;
+
+    const { context, page } = await staffLogin(browser, 'Authority', accounts.authority.email, accounts.authority.password);
+    await page.getByRole('button', { name: `View details for ${TITLE}` }).click();
+    const dialog = page.getByRole('dialog');
+    await expect(dialog.getByTestId('complaint-department')).toHaveText('Electricity Board');
+    await dialog.getByLabel('New department').selectOption('Water Department');
+    await dialog.getByLabel('Reason').fill(TRANSFER_REASON);
+    await dialog.getByRole('button', { name: 'Transfer to department' }).click();
+    await expect(dialog.getByText(/Transferred to Water Department/)).toBeVisible();
+    await expect(dialog.getByTestId('complaint-department')).toHaveText('Water Department');
+    await expect(dialog.getByTestId('complaint-status')).toHaveText('Under Review');
+    await expect(dialog.getByLabel('Transfer history')).toContainText(`Electricity Board → Water Department: ${TRANSFER_REASON}`);
+    await context.close();
+
+    // Same complaint: tracking ID, evidence, SLA deadline and status are unchanged
+    const after = (await db.collection('complaints').doc(complaintId).get()).data()!;
+    expect(after.trackingId).toBe(trackingId);
+    expect(after.assignedDepartment).toBe('Water Department');
+    expect(after.category).toBe('Electricity');
+    for (const field of ['photoURLs', 'sla', 'createdAt', 'status', 'priority', 'citizenId']) expect(after[field], field).toEqual(before[field]);
+    expect(await complaintsFiledBy(before.citizenId)).toHaveLength(2); // nothing recreated
+
+    // The Electricity official's open details close and the complaint leaves their feed and the API
+    await expect(power.page.getByRole('dialog')).toHaveCount(0);
+    await expect(power.page.getByText(/no longer in your queue/)).toBeVisible();
+    await expect(power.page.getByRole('button', { name: `View details for ${TITLE}` })).toHaveCount(0);
+    const token = await idToken(ELECTRICITY.email, ELECTRICITY.password);
+    expect((await power.page.request.get(`/api/complaints/${complaintId}`, { headers: { authorization: `Bearer ${token}` } })).status()).toBe(404);
+    // ...and cannot move it anywhere
+    const forged = await power.page.request.patch(`/api/complaints/${complaintId}`, {
+        headers: { authorization: `Bearer ${token}` },
+        data: { action: 'transfer', department: 'Electricity Board', fromDepartment: 'Water Department', reason: 'Taking it back' },
+    });
+    expect(forged.status()).toBe(403);
+    await power.context.close();
+
+    // The citizen sees the new department on the same tracking ID, live
+    await expect(citizen.page.getByText(`Filed as Electricity • Handled by Water Department`).first()).toBeVisible();
 });
 
 test('water official sees the complaint and its evidence, moves it forward, and cannot resolve, reprioritise or delete', async ({ browser }) => {
@@ -221,6 +396,22 @@ test('another department\'s official and another citizen are denied in the UI, t
     await expect(page).toHaveURL(/\/citizen\/dashboard/);
     await expect(page.getByText('No complaints filed yet').first()).toBeVisible();
     await expect(page.getByText(TITLE)).toHaveCount(0);
+    await expect(page.getByTestId('status-chart')).toHaveCount(0);
+
+    // A load failure is reported as a failure, never as zero complaints
+    await setFirestoreRules(`rules_version = '2';
+service cloud.firestore { match /databases/{database}/documents {
+  match /users/{uid} { allow read: if request.auth.uid == uid; }
+  match /{document=**} { allow read, write: if false; }
+} }`);
+    try {
+        await page.reload();
+        await expect(page.getByText(/complaints could not be loaded/i).first()).toBeVisible();
+        await expect(page.getByText('No complaints filed yet')).toHaveCount(0);
+        await expect(page.getByText('Total Complaints')).toHaveCount(0);
+    } finally {
+        await setFirestoreRules(readFileSync('firestore.rules', 'utf8'));
+    }
 
     for (const who of [ELECTRICITY, OTHER_CITIZEN]) {
         const token = await idToken(who.email, who.password);
@@ -245,6 +436,13 @@ test('authority prioritises and resolves the complaint, and can still find it af
     await expect(dialog.getByText('CRITICAL PRIORITY')).toBeVisible();
     await dialog.getByRole('button', { name: 'Close & Resolve Complaint' }).click();
     await expect(dialog.getByTestId('complaint-status')).toHaveText('Resolved');
+    await expect(dialog.getByRole('button', { name: 'Transfer to department' })).toHaveCount(0);
+    const token = await idToken(accounts.authority.email, accounts.authority.password);
+    const late = await page.request.patch(`/api/complaints/${complaintId}`, {
+        headers: { authorization: `Bearer ${token}` },
+        data: { action: 'transfer', department: 'Sanitation Department', fromDepartment: 'Water Department', reason: 'Too late to move' },
+    });
+    expect(late.status()).toBe(409);
     await dialog.getByRole('button', { name: 'Close details' }).click();
 
     // Active list drops it; Completed and All keep it with its real status
@@ -262,6 +460,22 @@ test('citizen sees the resolved status; public tracking shows only redacted deta
     await page.goto('/citizen/dashboard');
     await expect(page.getByText(TITLE).first()).toBeVisible();
     await expect(page.getByText('RESOLVED').first()).toBeVisible();
+
+    // Chart and cards agree: the street-light complaint is still pending, the transferred one resolved
+    await expect(page.getByText('Resolved: 1 of 2 complaints (50%)')).toBeVisible();
+    for (const [status, count] of [['pending', '1'], ['under-review', '0'], ['in-progress', '0'], ['resolved', '1'], ['withdrawn', '0']]) {
+        await expect(chartCount(page, status), status).toHaveText(count);
+    }
+    await expect(page.getByText('2 complaints: 1 pending, 0 under review, 0 in progress, 0 escalated, 1 resolved, 0 closed without resolution, 0 withdrawn.')).toBeAttached();
+
+    // The per-complaint timeline shows the transfer
+    await page.getByText(TITLE).first().click();
+    await expect(page.getByText(`transferred from Electricity Board to Water Department. Reason: ${TRANSFER_REASON}`)).toBeVisible();
+
+    // Phone width: no sideways scrolling
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await page.setViewportSize({ width: 1280, height: 720 });
 
     const visitor = await browser.newContext();
     const publicPage = await visitor.newPage();

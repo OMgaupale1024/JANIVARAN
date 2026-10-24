@@ -17,8 +17,8 @@ export interface Grievance {
     trackingId?: string; // User-facing tracking ID like "JAN-123456"
     title: string;
     description?: string;
-    category: string;
-    department?: Department;
+    category: string; // as filed by the citizen
+    department?: string; // current handling department
     location: string;
     status: GrievanceStatus;
     closedReason?: string; // e.g. 'withdrawn-by-citizen'

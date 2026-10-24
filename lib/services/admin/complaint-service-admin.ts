@@ -4,8 +4,8 @@ import { adminBucket, adminDb } from '@/lib/firebase-admin';
 import { HttpError, AuthUser } from '@/lib/server/auth';
 import { classifyComplaint } from '@/lib/engines/classification-engine';
 import {
-    Actor, NewComplaintInput, STATUS_TIMESTAMP_FIELD, MAX_TICKETS_PER_COMPLAINT, MAX_PHOTO_BYTES, PHOTO_CONTENT_TYPES,
-    checkPriorityChange, checkStatusChange, complaintDepartment, deletionMode, evidencePathFromURL, isStaffFor,
+    Actor, NewComplaintInput, STATUS_TIMESTAMP_FIELD, MAX_TICKETS_PER_COMPLAINT, MAX_PHOTO_BYTES, PHOTO_CONTENT_TYPES, TransferInput,
+    checkPriorityChange, checkStatusChange, checkTransfer, complaintDepartment, deletionMode, evidencePathFromURL, isStaffFor,
 } from '@/lib/complaint-policy';
 import { Complaint, ComplaintPriority, ComplaintStatus } from '@/types/backend';
 
@@ -82,8 +82,13 @@ async function verifyEvidence(urls: string[], uid: string): Promise<void> {
     for (const url of urls) {
         const path = evidencePathFromURL(url, { uid, bucket, emulatorHost: process.env.FIREBASE_STORAGE_EMULATOR_HOST });
         if (!path) throw new HttpError(400, 'Photo evidence must be uploaded through the complaint form');
-        const [metadata] = await adminBucket().file(path).getMetadata().catch(() => {
-            throw new HttpError(400, 'Uploaded photo was not found; please upload it again');
+        const [metadata] = await adminBucket().file(path).getMetadata().catch((err: { code?: unknown; message?: string }) => {
+            if (err.code === 404 && !/bucket does not exist/i.test(err.message ?? '')) {
+                throw new HttpError(400, 'Uploaded photo was not found; please upload it again');
+            }
+            // Missing bucket, no access or outage: the server's setup, not the citizen's photo (no URL in logs)
+            console.error(`Evidence check failed for bucket ${bucket}: code=${String(err.code)}`);
+            throw new HttpError(503, 'The server could not check your photos right now. Please try again later or submit without photos.');
         });
         if (!PHOTO_CONTENT_TYPES.includes(metadata.contentType ?? '') || Number(metadata.size) > MAX_PHOTO_BYTES) {
             throw new HttpError(400, 'Photos must be JPG, PNG or WebP images up to 5MB');
@@ -227,6 +232,48 @@ export async function updateComplaintAdmin(id: string, actor: AuthUser, changes:
         tx.update(ref, update);
         for (const [action, extra] of audits) writeAudit(tx, actor, id, action, extra);
         return { complaint, changed: true, oldStatus: complaint.status, newStatus: nextStatus };
+    });
+}
+
+/**
+ * Authority moves a complaint to the department that should handle it (for
+ * example one filed under the wrong category). It stays the same complaint:
+ * tracking ID, citizen, evidence, status, priority and SLA deadline are kept;
+ * the filed category stays as submitted. Access follows assignedDepartment,
+ * so the old department loses it on commit. An assignee who doesn't belong
+ * to the destination is cleared.
+ */
+export async function transferComplaintAdmin(id: string, actor: AuthUser, input: TransferInput) {
+    const ref = complaintRef(id);
+    const db = adminDb();
+
+    return db.runTransaction(async tx => {
+        const snap = await tx.get(ref);
+        if (!snap.exists) throw new HttpError(404, 'Complaint not found');
+        const complaint = { id: snap.id, ...snap.data() } as StoredComplaint;
+        const refused = checkTransfer(actor, complaint, input);
+        if (refused) throw new HttpError(...refused);
+
+        const from = complaintDepartment(complaint) ?? null;
+        const to = input.department;
+        const assignee = complaint.assignedTo ? (await tx.get(db.collection('users').doc(complaint.assignedTo))).data() : undefined;
+        const unassign = !!complaint.assignedTo && !(assignee?.role === 'official' && assignee.department === to);
+        const now = Timestamp.now();
+
+        tx.update(ref, {
+            department: to,
+            assignedDepartment: to,
+            // Shown on the citizen's timeline; who did it stays in the audit log
+            transfers: FieldValue.arrayUnion({ from, to, reason: input.reason, at: now }),
+            ...(unassign ? { assignedTo: FieldValue.delete() } : {}),
+            updatedAt: now,
+        });
+        writeAudit(tx, actor, id, 'transferred', {
+            oldValue: from,
+            newValue: to,
+            metadata: { reason: input.reason, ...(unassign ? { unassigned: complaint.assignedTo } : {}) },
+        });
+        return { complaint, from, to };
     });
 }
 

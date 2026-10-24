@@ -5,15 +5,21 @@ import {
     getEscalationsAdmin,
     removeComplaintAdmin,
     serialize,
+    transferComplaintAdmin,
     updateComplaintAdmin,
 } from '@/lib/services/admin/complaint-service-admin';
 import { complaintRoutedEmail, queueEmail, statusChangeEmail } from '@/lib/services/notification-service';
-import { canViewComplaint, isStaffFor } from '@/lib/complaint-policy';
+import { canViewComplaint, isStaffFor, validateTransfer } from '@/lib/complaint-policy';
 import { errorResponse, HttpError, readJson, requireUser } from '@/lib/server/auth';
 
 type Params = { params: Promise<{ id: string }> };
 
-const PATCH_FIELDS = ['action', 'status', 'priority', 'officialId'];
+// Fields each PATCH action accepts besides `action`
+const ACTION_FIELDS: Record<string, string[]> = {
+    updateStatus: ['status', 'priority'],
+    assign: ['officialId'],
+    transfer: ['department', 'fromDepartment', 'reason'],
+};
 
 /**
  * GET /api/complaints/[id]
@@ -47,6 +53,7 @@ export async function GET(request: NextRequest, props: Params) {
  * Staff actions:
  *  - { action: 'updateStatus', status?, priority? }  (status and/or priority, saved atomically)
  *  - { action: 'assign', officialId }                (authority only)
+ *  - { action: 'transfer', department, fromDepartment, reason }  (authority only)
  */
 export async function PATCH(request: NextRequest, props: Params) {
     try {
@@ -54,8 +61,20 @@ export async function PATCH(request: NextRequest, props: Params) {
         const { id } = await props.params;
         const body = await readJson(request);
 
-        const unknownField = Object.keys(body).find(k => !PATCH_FIELDS.includes(k));
+        const fields = typeof body.action === 'string' && Object.hasOwn(ACTION_FIELDS, body.action) ? ACTION_FIELDS[body.action] : [];
+        const unknownField = Object.keys(body).find(k => k !== 'action' && !fields.includes(k));
         if (unknownField) throw new HttpError(400, `Unexpected field: ${unknownField}`);
+
+        if (body.action === 'transfer') {
+            const input = validateTransfer(body);
+            if (!input.ok) throw new HttpError(400, input.error);
+            const { complaint, to } = await transferComplaintAdmin(id, user, input.value);
+            // Committed; the citizen is told where it went (destination from the transaction, not the request)
+            const notification = complaint.citizenEmail
+                ? queueEmail(complaintRoutedEmail({ ...complaint, department: to, assignedDepartment: to }, complaint.citizenEmail))
+                : 'skipped';
+            return NextResponse.json({ success: true, message: `Transferred to ${to}`, notification });
+        }
 
         let changes;
         if (body.action === 'updateStatus' && (body.status !== undefined || body.priority !== undefined)) {

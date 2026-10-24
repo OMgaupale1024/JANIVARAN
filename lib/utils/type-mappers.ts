@@ -59,6 +59,10 @@ export function complaintToGrievance(complaint: Complaint): Grievance {
         const timestamp = iso(complaint[field]);
         if (timestamp) history.push({ timestamp, action, by: 'Official' });
     }
+    for (const t of complaint.transfers ?? []) {
+        const timestamp = iso(t.at);
+        if (timestamp) history.push({ timestamp, action: 'TRANSFERRED', by: 'Authority', details: `${t.from ?? 'No department'} → ${t.to}: ${t.reason}` });
+    }
     history.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
 
     return {
@@ -67,6 +71,7 @@ export function complaintToGrievance(complaint: Complaint): Grievance {
         title: complaint.title,
         description: complaint.description,
         category: complaint.category,
+        department: complaint.assignedDepartment ?? complaint.department,
         location: complaint.location,
         status: STATUS_MAP[complaint.status] || 'PENDING',
         closedReason: complaint.closedReason,

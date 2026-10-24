@@ -224,3 +224,73 @@ test('ticket validation', () => {
     assert.equal(policy.validateTicket({ reason: 'made up' }).ok, false);
     assert.equal(policy.validateTicket({ reason: 'Other', message: 'x'.repeat(1001) }).ok, false);
 });
+
+test('GPS fix is appended once, keeps typed text, fits the limit and labels broad estimates', () => {
+    const fix = { latitude: 18.520412, longitude: 73.856743, accuracy: 25.4 };
+    const once = policy.withGpsFix('Ward 7 market gate', fix);
+    assert.equal(once, 'Ward 7 market gate (GPS 18.52041, 73.85674 ±25 m)');
+    // A second press replaces the earlier fix instead of appending another
+    assert.equal(policy.withGpsFix(once, { ...fix, accuracy: 9 }), 'Ward 7 market gate (GPS 18.52041, 73.85674 ±9 m)');
+    assert.equal(policy.withGpsFix('', fix), 'GPS 18.52041, 73.85674 ±25 m');
+
+    const coarse = policy.withGpsFix('Near bus stand', { ...fix, accuracy: 3200 });
+    assert.equal(coarse, 'Near bus stand (GPS 18.520, 73.857 ±3.2 km, approximate)');
+
+    // Long typed text is shortened so the whole fix still fits within the validated length
+    const long = policy.withGpsFix('x'.repeat(400), fix);
+    assert.ok(long.length <= policy.MAX_LOCATION);
+    assert.match(long, /\(GPS 18\.52041, 73\.85674 ±25 m\)$/);
+    assert.equal(policy.validateNewComplaint({ category: 'Other', description: 'Something is broken here', location: long }).ok, true);
+});
+
+test('citizen status breakdown counts each complaint once and keeps withdrawal apart from resolution', () => {
+    const at = new Date(NOW);
+    const sample = [
+        { status: 'pending' }, { status: 'under-review' }, { status: 'under-review' }, { status: 'in-progress' },
+        { status: 'escalated' }, { status: 'resolved', resolvedAt: at },
+        { status: 'closed', resolvedAt: at, closedAt: at }, // resolved, later closed
+        { status: 'closed', closedReason: 'withdrawn-by-citizen', closedAt: at },
+        { status: 'closed', closedAt: at }, // closed without resolution
+    ];
+    const counts = Object.fromEntries(policy.CITIZEN_STATUSES.map(s => [s.key, 0]));
+    sample.forEach(c => counts[policy.citizenStatus(c)]++);
+    assert.deepEqual(counts, { 'pending': 1, 'under-review': 2, 'in-progress': 1, 'escalated': 1, 'resolved': 2, 'closed': 1, 'withdrawn': 1 });
+    assert.equal(Object.values(counts).reduce((a, b) => a + b), sample.length);
+    // Every stored status has a segment
+    for (const status of policy.COMPLAINT_STATUSES) assert.ok(policy.CITIZEN_STATUSES.some(s => s.key === policy.citizenStatus({ status })));
+});
+
+test('transfer validation and policy', () => {
+    const body = { department: 'Water Department', fromDepartment: 'Electricity Board', reason: 'Water pipe leak filed under Electricity' };
+    assert.deepEqual(policy.validateTransfer(body), { ok: true, value: body });
+    assert.equal(policy.validateTransfer({ ...body, department: 'Forged Department' }).ok, false);
+    assert.equal(policy.validateTransfer({ ...body, department: 'toString' }).ok, false);
+    assert.equal(policy.validateTransfer({ ...body, reason: 'bad' }).ok, false);
+    assert.equal(policy.validateTransfer({ ...body, reason: 'x'.repeat(201) }).ok, false);
+    assert.equal(policy.validateTransfer({ department: body.department, reason: body.reason }).ok, false);
+    assert.deepEqual(policy.DEPARTMENTS.slice().sort(), ['Electricity Board', 'General Administration', 'Public Works Department', 'Sanitation Department', 'Transport Department', 'Water Department']);
+
+    const input = policy.validateTransfer(body).value;
+    const c = { citizenId: 'alice', status: 'in-progress', department: 'Electricity Board', assignedDepartment: 'Electricity Board' };
+    const adminActor = { uid: 'a', role: 'admin' };
+    assert.equal(policy.checkTransfer(adminActor, c, input), null);
+    assert.equal(policy.checkTransfer({ uid: 'o', role: 'official', department: 'Electricity Board' }, c, input)[0], 403);
+    assert.equal(policy.checkTransfer({ uid: 'alice', role: 'citizen' }, c, input)[0], 403);
+    assert.equal(policy.checkTransfer(adminActor, { ...c, status: 'resolved' }, input)[0], 409);
+    assert.equal(policy.checkTransfer(adminActor, { ...c, status: 'closed' }, input)[0], 409);
+    assert.equal(policy.checkTransfer(adminActor, { ...c, assignedDepartment: 'Water Department' }, input)[0], 409); // stale view
+    assert.equal(policy.checkTransfer(adminActor, c, { ...input, department: 'Electricity Board' })[0], 400); // same department
+});
+
+test('mapper shows the current department and transfers in the staff timeline', () => {
+    const at = new Date(NOW - HOUR);
+    const g = complaintToGrievance(complaint({
+        category: 'Electricity', department: 'Water Department', assignedDepartment: 'Water Department',
+        transfers: [{ from: 'Electricity Board', to: 'Water Department', reason: 'Pipe leak', at }],
+    }));
+    assert.equal(g.category, 'Electricity');
+    assert.equal(g.department, 'Water Department');
+    const entry = g.history.find(h => h.action === 'TRANSFERRED');
+    assert.equal(entry.timestamp, at.toISOString());
+    assert.equal(entry.details, 'Electricity Board → Water Department: Pipe leak');
+});

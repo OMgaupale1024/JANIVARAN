@@ -711,6 +711,91 @@ test('api: complaints are assigned only to officials of their own department', a
     assert.equal(res.status, 409);
 });
 
+test('api: authority transfers a wrongly filed complaint; same record, new department, old department loses access', async () => {
+    // Filed under Electricity, actually a water leak; the power official is working it
+    const photo = await uploadEvidence(alice.uid);
+    const deadline = Timestamp.fromMillis(Date.now() + 5 * HOUR);
+    const id = await seedComplaint({
+        citizenId: alice.uid, citizenEmail: alice.email, category: 'Electricity', department: 'Electricity Board', assignedDepartment: 'Electricity Board',
+        status: 'in-progress', priority: 'high', photoURLs: [photo], assignedTo: powerOfficial.uid,
+        sla: { assignedHours: 12, deadline, remainingHours: 12, status: 'on-track' },
+    });
+    const before = await complaintDoc(id);
+    const transfer = (token, body) => call(routes.complaint.PATCH, { method: 'PATCH', id, token, body: { action: 'transfer', ...body } });
+    const valid = { department: 'Water Department', fromDepartment: 'Electricity Board', reason: 'Water pipe leak filed under Electricity' };
+
+    // Forged or invalid requests change nothing
+    assert.equal((await transfer(alice.token, valid)).status, 403);
+    assert.equal((await transfer(powerOfficial.token, valid)).status, 403);
+    assert.equal((await transfer(waterOfficial.token, valid)).status, 403);
+    assert.equal((await transfer(admin.token, { ...valid, department: 'Forged Department' })).status, 400);
+    assert.equal((await transfer(admin.token, { ...valid, reason: '' })).status, 400);
+    assert.equal((await transfer(admin.token, { ...valid, status: 'resolved' })).status, 400);
+    assert.equal((await transfer(admin.token, { ...valid, department: 'Electricity Board' })).status, 400);
+    assert.equal((await transfer(admin.token, { ...valid, fromDepartment: 'Sanitation Department' })).status, 409);
+    assert.equal((await call(routes.complaint.PATCH, { method: 'PATCH', id: 'missing-id', token: admin.token, body: { action: 'transfer', ...valid } })).status, 404);
+    assert.deepEqual(await complaintDoc(id), before);
+
+    // Two authorities acting on the same view at once: exactly one transfer happens
+    const [a, b] = await Promise.all([transfer(admin.token, valid), transfer(admin.token, { ...valid, department: 'Public Works Department' })]);
+    assert.deepEqual([a.status, b.status].sort(), [200, 409], JSON.stringify([a.body, b.body]));
+    const winner = a.status === 200 ? 'Water Department' : 'Public Works Department';
+    if (winner !== 'Water Department') {
+        const back = await transfer(admin.token, { department: 'Water Department', fromDepartment: winner, reason: 'Water pipe leak filed under Electricity' });
+        assert.equal(back.status, 200, JSON.stringify(back.body));
+    }
+    assert.equal((a.status === 200 ? a : b).body.notification, 'skipped'); // no SMTP configured in tests
+
+    const after = await complaintDoc(id);
+    assert.equal(after.department, 'Water Department');
+    assert.equal(after.assignedDepartment, 'Water Department');
+    assert.equal(after.assignedTo, undefined, 'the Electricity assignee cannot work it any more');
+    for (const field of ['trackingId', 'citizenId', 'category', 'status', 'priority', 'photoURLs', 'createdAt', 'lastStatusChange', 'sla']) {
+        assert.deepEqual(after[field], before[field], field);
+    }
+    const last = after.transfers.at(-1);
+    assert.equal(last.to, 'Water Department');
+    assert.equal(last.reason, 'Water pipe leak filed under Electricity');
+    assert.ok(after.transfers.every(t => !('by' in t)), 'actor stays in the audit log only');
+
+    const audit = (await adminDb().collection('auditLogs').where('complaintId', '==', id).get()).docs.map(d => d.data())
+        .filter(l => l.action === 'transferred' && l.newValue === 'Water Department');
+    assert.equal(audit.length, 1);
+    assert.equal(audit[0].performedBy, admin.uid);
+    assert.equal(audit[0].metadata.reason, 'Water pipe leak filed under Electricity');
+    assert.ok(audit[0].timestamp);
+
+    // API: destination department and the citizen see it; the old department doesn't
+    assert.equal((await call(routes.complaint.GET, { id, token: waterOfficial.token })).status, 200);
+    assert.equal((await call(routes.complaint.GET, { id, token: powerOfficial.token })).status, 404);
+    const own = await call(routes.complaint.GET, { id, token: alice.token });
+    assert.equal(own.status, 200);
+    assert.equal(own.body.data.complaint.trackingId, before.trackingId);
+    assert.equal(own.body.data.complaint.transfers.at(-1).to, 'Water Department');
+    const listed = async user => JSON.stringify((await call(routes.complaints.GET, { token: user.token })).body);
+    assert.ok((await listed(waterOfficial)).includes(id));
+    assert.ok(!(await listed(powerOfficial)).includes(id));
+    // The old department can no longer move it either
+    assert.equal((await call(routes.complaint.PATCH, { method: 'PATCH', id, token: powerOfficial.token, body: { action: 'updateStatus', status: 'under-review' } })).status, 403);
+
+    // Firestore rules follow the new department
+    await denied(fs.getDoc(fs.doc(clientFor(powerOfficial).db, 'complaints', id)));
+    assert.equal((await fs.getDoc(fs.doc(clientFor(waterOfficial).db, 'complaints', id))).get('trackingId'), before.trackingId);
+    assert.equal((await fs.getDoc(fs.doc(clientFor(alice).db, 'complaints', id))).get('department'), 'Water Department');
+
+    // Completed complaints are not transferred
+    const resolve = await call(routes.complaint.PATCH, { method: 'PATCH', id, token: admin.token, body: { action: 'updateStatus', status: 'resolved' } });
+    assert.equal(resolve.status, 200);
+    assert.equal((await transfer(admin.token, { department: 'Sanitation Department', fromDepartment: 'Water Department', reason: 'Testing a completed transfer' })).status, 409);
+});
+
+test('api: a transfer keeps an assignee who belongs to the destination', async () => {
+    const id = await seedComplaint({ citizenId: alice.uid, category: 'Water Supply', assignedTo: waterOfficial.uid, department: 'Electricity Board', assignedDepartment: 'Electricity Board' });
+    const res = await call(routes.complaint.PATCH, { method: 'PATCH', id, token: admin.token, body: { action: 'transfer', department: 'Water Department', fromDepartment: 'Electricity Board', reason: 'Belongs to Water' } });
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.equal((await complaintDoc(id)).assignedTo, waterOfficial.uid);
+});
+
 // ---------- demo account provisioning ----------
 
 const DEMO = {

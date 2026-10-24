@@ -8,17 +8,21 @@ import { MapPin, Send, ArrowLeft, CheckCircle, Upload, ArrowRight, Loader2, X } 
 import { useAuth } from '@/lib/auth-context';
 import { storage } from '@/lib/firebase-config';
 import { apiFetch, ApiError } from '@/lib/api-client';
-import { MAX_PHOTOS, MAX_PHOTO_BYTES, PHOTO_CONTENT_TYPES } from '@/lib/complaint-policy';
+import { MAX_LOCATION, MAX_PHOTOS, MAX_PHOTO_BYTES, PHOTO_CONTENT_TYPES, withGpsFix } from '@/lib/complaint-policy';
 
 const EXTENSIONS: Record<string, string> = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' };
 const EMPTY_FORM = { title: '', category: '', description: '', location: '' };
-const PHOTO_TIMEOUT_MS = 120_000; // per photo; progress is shown meanwhile
+const PHOTO_TIMEOUT_MS = 120_000; // per photo, upload plus download link; progress is shown meanwhile
+// Covers an unanswered permission prompt too, which the geolocation timeout option does not
+const GPS_WAIT_MS = 20_000;
 const DRAFT_KEY = 'jannivaran:complaint-draft';
 const SIGN_IN_URL = '/citizen?next=/file-complaint';
 
 type FormState = typeof EMPTY_FORM;
 type Draft = { formData: FormState; step: number; requestId: string | null };
-type FormError = { message: string; signIn?: boolean; savedAs?: string };
+type FormError = { message: string; signIn?: boolean; savedAs?: string; detail?: string; withoutPhotos?: boolean };
+// Where a photo failed (sending the file, or fetching its link afterwards) and the SDK's error code
+type UploadFailure = { stage: 'upload' | 'link'; code: string; status?: number };
 
 // The draft survives a sign-in round trip or a reload (photos have to be re-attached)
 function readDraft(): Draft | null {
@@ -37,30 +41,78 @@ function writeDraft(draft: Draft | null) {
     }
 }
 
-// Upload one photo to the citizen's own folder (Storage rules enforce owner, type and size)
-function uploadPhoto(uid: string, file: File, onProgress: (percent: number) => void): Promise<string> {
+// Upload one photo to the citizen's own folder (Storage rules enforce owner, type and size).
+// Settles within PHOTO_TIMEOUT_MS; rejects with an UploadFailure; `signal` cancels it (leaving the page).
+function uploadPhoto(uid: string, file: File, onProgress: (percent: number) => void, signal: AbortSignal): Promise<string> {
     const objectRef = ref(storage, `complaints/${uid}/${crypto.randomUUID()}/photo.${EXTENSIONS[file.type]}`);
     const task = uploadBytesResumable(objectRef, file, { contentType: file.type });
-    const timer = setTimeout(() => task.cancel(), PHOTO_TIMEOUT_MS);
+    let stage: UploadFailure['stage'] = 'upload';
     return new Promise<string>((resolve, reject) => {
+        const fail = (code: string, status?: number) => {
+            task.cancel();
+            reject({ stage, code, status } satisfies UploadFailure);
+        };
+        const timer = setTimeout(() => fail('timeout'), PHOTO_TIMEOUT_MS);
+        const abort = () => fail('aborted');
+        signal.addEventListener('abort', abort, { once: true });
+        const settle = <T,>(then: (value: T) => void) => (value: T) => {
+            clearTimeout(timer);
+            signal.removeEventListener('abort', abort);
+            then(value);
+        };
+        const sdkFailure = settle((err: { code?: string; status?: number }) => reject({ stage, code: err?.code ?? 'unknown', status: err?.status || undefined } satisfies UploadFailure));
         task.on('state_changed',
             snap => onProgress(Math.round((snap.bytesTransferred / snap.totalBytes) * 100)),
-            reject,
-            () => getDownloadURL(objectRef).then(resolve, reject));
-    }).finally(() => clearTimeout(timer));
+            sdkFailure,
+            () => {
+                stage = 'link';
+                getDownloadURL(objectRef).then(settle(resolve), sdkFailure);
+            });
+    });
 }
 
-function describeFailure(error: unknown, stage: 'upload' | 'save'): FormError {
-    if (stage === 'upload') {
-        const code = (error as { code?: string })?.code ?? '';
-        if (code === 'storage/unauthorized' || code === 'storage/unauthenticated') {
-            return { message: 'Photo upload was refused. Make sure you are signed in and each photo is a JPG, PNG or WebP image under 5MB.' };
-        }
-        if (code === 'storage/retry-limit-exceeded' || code === 'storage/canceled') {
-            return { message: "Couldn't reach photo storage. Check your connection and try again, or remove the photos and submit without them." };
-        }
-        return { message: 'Photo upload failed. Try again, or remove the photos and submit without them.' };
+function describeUploadFailure({ stage, code, status }: UploadFailure): FormError {
+    const detail = `Photo ${stage === 'upload' ? 'upload' : 'link'} failed: ${code}${status ? ` (HTTP ${status})` : ''}`;
+    const tail = 'Your details are kept. Try again, or submit without photos.';
+    if (stage === 'link') {
+        return { message: `A photo was uploaded but its link could not be fetched. ${tail}`, detail, withoutPhotos: true };
     }
+    // A bucket that doesn't exist answers 404, which the SDK reports as storage/unknown
+    if (code === 'storage/bucket-not-found' || code === 'storage/no-default-bucket' || (code === 'storage/unknown' && status === 404)) {
+        return { message: "Photo storage isn't set up on this site yet, so photos can't be attached right now. You can submit without photos.", detail, withoutPhotos: true };
+    }
+    if (code === 'storage/unauthenticated') {
+        return { message: 'Your session has expired. Sign in again; your details are kept on this device.', signIn: true, detail };
+    }
+    if (code === 'storage/unauthorized' || code === 'storage/unauthorized-app') {
+        return { message: `Photo storage refused the upload. Each photo must be a JPG, PNG or WebP image under 5MB. ${tail}`, detail, withoutPhotos: true };
+    }
+    if (code === 'storage/quota-exceeded') {
+        return { message: `Photo storage is over its quota, so photos can't be attached right now. ${tail}`, detail, withoutPhotos: true };
+    }
+    if (code === 'storage/retry-limit-exceeded' || code === 'timeout') {
+        return { message: `Couldn't reach photo storage. Check your connection. ${tail}`, detail, withoutPhotos: true };
+    }
+    return { message: `Photo upload failed. ${tail}`, detail, withoutPhotos: true };
+}
+
+// Why the browser gave no position; the permission state separates a site block from device settings
+async function describeGpsError(err: GeolocationPositionError): Promise<string> {
+    const manual = 'You can type the address or a landmark instead.';
+    if (err.code === err.POSITION_UNAVAILABLE) return `Your device couldn't work out its location (location services off, or no GPS or Wi-Fi signal). ${manual}`;
+    if (err.code === err.TIMEOUT) return `Finding your location took too long. Press Use GPS to try again. ${manual}`;
+    let state: PermissionState | undefined;
+    try {
+        state = (await navigator.permissions?.query({ name: 'geolocation' }))?.state;
+    } catch {
+        // Permissions API unavailable: fall back to the general message
+    }
+    if (state === 'granted') return `This site may use your location, but your device's location services are off or blocked for this browser. Turn them on in system settings. ${manual}`;
+    if (state === 'prompt') return `Location access wasn't given. Press Use GPS to be asked again. ${manual}`;
+    return `Location access is blocked for this site. Allow it in your browser's site settings to use GPS. ${manual}`;
+}
+
+function describeFailure(error: unknown): FormError {
     if (!(error instanceof ApiError)) return { message: 'Something went wrong. Your details are kept, so please try again.' };
     switch (error.kind) {
         case 'no-response':
@@ -90,11 +142,16 @@ export default function FileComplaintPage() {
     const [progress, setProgress] = useState(''); // non-empty while a submission is running
     const [error, setError] = useState<FormError | null>(null);
     const [gpsStatus, setGpsStatus] = useState('');
+    const [locating, setLocating] = useState(false);
     const [restored, setRestored] = useState(false);
 
     const submitting = useRef(false);
     const requestId = useRef<string | null>(null); // one per complaint, kept across retries
-    const uploaded = useRef(new Map<File, string>()); // photos already uploaded: reused on retry
+    // Photos already uploaded, reused on retry; only for the account that uploaded them
+    const uploaded = useRef({ uid: '', urls: new Map<File, string>() });
+    const uploads = useRef<AbortController | null>(null);
+    const gpsRequest = useRef(0); // the live location request; callbacks for any other number are ignored
+    const gpsTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
 
     const busy = progress !== '';
     const needsSignIn = !authLoading && !firebaseUser;
@@ -110,6 +167,13 @@ export default function FileComplaintPage() {
         setStep(Math.min(draft.step, 3));
         setRestored(true);
         requestId.current = draft.requestId;
+    }, []);
+
+    // Leaving the page cancels uploads in flight and ignores any late location fix
+    useEffect(() => () => {
+        uploads.current?.abort();
+        gpsRequest.current++;
+        clearTimeout(gpsTimer.current);
     }, []);
 
     const goToSignIn = () => {
@@ -133,29 +197,52 @@ export default function FileComplaintPage() {
         setFileError(rejected.join('. '));
     };
 
+    // Ends the live location request (if any): its callbacks will be ignored from now on
+    const stopGps = (message: string) => {
+        gpsRequest.current++;
+        clearTimeout(gpsTimer.current);
+        setLocating(false);
+        setGpsStatus(message);
+    };
+
     const fillGpsLocation = () => {
-        if (!('geolocation' in navigator)) {
-            setGpsStatus('GPS is not available in this browser. Type the address or a landmark instead.');
-            return;
-        }
-        setGpsStatus('Getting your location…');
+        if (locating) return;
+        const manual = 'Type the address or a landmark instead.';
+        if (!window.isSecureContext) return setGpsStatus(`Location only works over a secure (https) connection. ${manual}`);
+        if (!('geolocation' in navigator)) return setGpsStatus(`This browser can't share your location. ${manual}`);
+        const policy = (document as Document & { featurePolicy?: { allowsFeature(feature: string): boolean } }).featurePolicy;
+        if (policy && !policy.allowsFeature('geolocation')) return setGpsStatus(`Location is blocked on this page by the site showing it. ${manual}`);
+
+        const id = ++gpsRequest.current;
+        setLocating(true);
+        setGpsStatus('Locating… If your browser asks, allow location access.');
+        gpsTimer.current = setTimeout(() => {
+            if (gpsRequest.current === id) stopGps(`No location yet. If your browser is asking for permission, answer it and press Use GPS again. ${manual}`);
+        }, GPS_WAIT_MS);
         navigator.geolocation.getCurrentPosition(
             ({ coords }) => {
-                const fix = `GPS ${coords.latitude.toFixed(5)}, ${coords.longitude.toFixed(5)} ±${Math.round(coords.accuracy)} m`;
-                setFormData(prev => {
-                    const typed = prev.location.replace(/\s*\(?GPS [^)]*\)?$/, '').trim();
-                    return { ...prev, location: (typed ? `${typed} (${fix})` : fix).slice(0, 300) };
-                });
-                setGpsStatus('Coordinates added. Only you and the officials handling this complaint can see them.');
+                if (gpsRequest.current !== id) return; // timed out, superseded, location edited, or page left
+                setFormData(prev => ({ ...prev, location: withGpsFix(prev.location, coords) }));
+                stopGps(coords.accuracy > 1000
+                    ? `Approximate location added (within about ${(coords.accuracy / 1000).toFixed(1)} km): your device only gave a broad estimate. Add a street or landmark so officials can find the spot.`
+                    : `Coordinates added (accurate to about ${Math.round(coords.accuracy)} m). Only you and the officials handling this complaint can see them.`);
             },
-            err => setGpsStatus(err.code === err.PERMISSION_DENIED
-                ? 'Location permission was denied. Type the address or a landmark instead.'
-                : "Couldn't get your location. Type the address or a landmark instead."),
-            { enableHighAccuracy: true, timeout: 10_000, maximumAge: 60_000 },
+            async err => {
+                if (gpsRequest.current !== id) return;
+                const message = await describeGpsError(err);
+                if (gpsRequest.current === id) stopGps(message);
+            },
+            { enableHighAccuracy: true, timeout: 15_000, maximumAge: 60_000 },
         );
     };
 
-    const handleSubmit = async () => {
+    const editLocation = (location: string) => {
+        // Typing wins: a fix arriving afterwards must not rewrite what the citizen just entered
+        if (locating) stopGps('Location request stopped because you edited the location. Press Use GPS again to add coordinates.');
+        setFormData(prev => ({ ...prev, location }));
+    };
+
+    const handleSubmit = async (photos: File[] = files) => {
         if (submitting.current) return; // double click or a second tap while running
         if (needsSignIn) return goToSignIn();
         if (!firebaseUser || !user) return;
@@ -163,15 +250,20 @@ export default function FileComplaintPage() {
         setError(null);
         requestId.current ??= crypto.randomUUID();
 
+        if (uploaded.current.uid !== firebaseUser.uid) uploaded.current = { uid: firebaseUser.uid, urls: new Map() };
+        const { urls } = uploaded.current;
+        uploads.current = new AbortController();
+        const { signal } = uploads.current;
+
         let stage: 'upload' | 'save' = 'upload';
         try {
             const photoURLs: string[] = [];
-            for (const [i, file] of files.entries()) {
-                const label = `Uploading photo ${i + 1} of ${files.length}`;
+            for (const [i, file] of photos.entries()) {
+                const label = `Uploading photo ${i + 1} of ${photos.length}`;
                 setProgress(`${label}…`);
-                const url = uploaded.current.get(file)
-                    ?? await uploadPhoto(firebaseUser.uid, file, percent => setProgress(`${label} (${percent}%)…`));
-                uploaded.current.set(file, url);
+                const url = urls.get(file)
+                    ?? await uploadPhoto(firebaseUser.uid, file, percent => setProgress(`${label} (${percent}%)…`), signal);
+                urls.set(file, url);
                 photoURLs.push(url);
             }
 
@@ -197,10 +289,15 @@ export default function FileComplaintPage() {
             setTrackingId(saved);
             setStep(4);
             requestId.current = null;
-            uploaded.current.clear();
+            urls.clear();
             writeDraft(null);
         } catch (err) {
-            setError(describeFailure(err, stage));
+            if (stage === 'upload') {
+                // Stage and SDK code only: never the file name or a tokenised URL
+                console.warn('Complaint photo upload failed', err);
+                if ((err as UploadFailure).code === 'aborted') return;
+            }
+            setError(stage === 'upload' ? describeUploadFailure(err as UploadFailure) : describeFailure(err));
             writeDraft({ formData, step: 3, requestId: requestId.current });
         } finally {
             submitting.current = false;
@@ -213,16 +310,21 @@ export default function FileComplaintPage() {
         handleSubmit();
     };
 
+    const submitWithoutPhotos = () => {
+        setFiles([]);
+        handleSubmit([]);
+    };
+
     const resetForm = () => {
         setStep(1);
         setFormData(EMPTY_FORM);
         setFiles([]);
         setFileError('');
         setError(null);
-        setGpsStatus('');
+        stopGps('');
         setRestored(false);
         requestId.current = null;
-        uploaded.current.clear();
+        uploaded.current.urls.clear();
         writeDraft(null);
     };
 
@@ -324,26 +426,28 @@ export default function FileComplaintPage() {
                                             <input
                                                 id="complaint-location"
                                                 type="text"
-                                                maxLength={300}
+                                                maxLength={MAX_LOCATION}
                                                 aria-describedby="gps-status"
-                                                className="w-full border border-gray-300 rounded-xl p-4 pl-12 pr-24 focus:ring-2 focus:ring-noble-dark focus:border-transparent outline-none"
+                                                className="w-full border border-gray-300 rounded-xl p-4 pl-12 pr-28 focus:ring-2 focus:ring-noble-dark focus:border-transparent outline-none"
                                                 placeholder="Enter address or landmark"
                                                 value={formData.location}
-                                                onChange={(e) => setFormData({ ...formData, location: e.target.value })}
+                                                onChange={(e) => editLocation(e.target.value)}
                                             />
                                             <button
                                                 type="button"
                                                 onClick={fillGpsLocation}
-                                                className="absolute right-3 top-1/2 -translate-y-1/2 text-xs bg-gray-100 hover:bg-gray-200 px-3 py-1.5 rounded-lg text-gray-600"
+                                                disabled={locating}
+                                                aria-busy={locating}
+                                                className="absolute right-3 top-1/2 -translate-y-1/2 text-xs bg-gray-100 hover:bg-gray-200 px-3 py-1.5 rounded-lg text-gray-600 disabled:cursor-wait flex items-center gap-1"
                                             >
-                                                Use GPS
+                                                {locating ? <><Loader2 className="animate-spin" size={12} /> Locating…</> : 'Use GPS'}
                                             </button>
                                         </div>
                                         <p id="gps-status" role="status" className="text-xs text-gray-500 mt-1 min-h-4">{gpsStatus}</p>
                                     </div>
                                     <button
                                         type="button"
-                                        onClick={() => setStep(3)}
+                                        onClick={() => { if (locating) stopGps(''); setStep(3); }}
                                         disabled={formData.description.trim().length < 10 || formData.location.trim().length < 3}
                                         className="w-full bg-noble-dark text-white py-4 rounded-xl font-bold text-lg disabled:opacity-50 disabled:cursor-not-allowed hover:bg-opacity-90 transition-all flex items-center justify-center gap-2"
                                     >
@@ -410,6 +514,10 @@ export default function FileComplaintPage() {
                                 {error && (
                                     <div role="alert" className="p-4 bg-red-50 border border-red-200 rounded-xl text-sm text-red-600 space-y-2">
                                         <p>{error.message}</p>
+                                        {error.detail && <p className="text-xs text-red-500">{error.detail}</p>}
+                                        {error.withoutPhotos && files.length > 0 && (
+                                            <button type="button" onClick={submitWithoutPhotos} className="font-semibold underline">Submit without photos</button>
+                                        )}
                                         {error.signIn && (
                                             <button type="button" onClick={goToSignIn} className="font-semibold underline">Sign in again</button>
                                         )}
@@ -442,7 +550,7 @@ export default function FileComplaintPage() {
                                     </button>
                                     <button
                                         type="button"
-                                        onClick={handleSubmit}
+                                        onClick={() => handleSubmit()}
                                         disabled={busy || authLoading || !!profileProblem}
                                         className="flex-[2] bg-green-600 text-white py-4 rounded-xl font-bold text-lg hover:bg-green-700 transition-all shadow-lg shadow-green-200 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                                     >
